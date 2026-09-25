@@ -567,6 +567,15 @@ This section lists the complete public function surface of `EscrowContract` (`co
 |----------|-----------|-------------|
 | `get_platform_stats` | `() -> PlatformStats` | Returns cumulative on-chain counters — `total_matches`, `total_volume` (staked, in base token units), and `total_payouts` — maintained without requiring off-chain event indexing. |
 
+#### ELO Rating Registry
+
+These functions expose the oracle-verified player rating registry introduced in issue #1434. Both are part of the contract ABI (inside the `#[contractimpl]` block) and are callable on-chain and through the generated `EscrowContractClient`.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `register_player_rating` | `(caller: Address, player: Address, platform: Platform, username: String, rating: u32) -> Result<(), Error>` | Oracle-only. Records or updates the verified ELO rating for `player` on `platform` (Lichess or Chess.com). `caller` must be the configured oracle address. Emits `("rating", "registered")` with payload `(player, platform, rating)`. Returns `Error::Unauthorized` if `caller` is not the oracle or the contract is uninitialized. |
+| `get_player_rating` | `(player: Address, platform: Platform) -> Option<PlayerRating>` | View function, no authentication required. Returns the stored `PlayerRating` (username, rating, recorded_ledger) for the given `(player, platform)` pair, or `None` if no rating has been registered yet. |
+
 #### Upgrade & Migration
 
 | Function | Signature | Description |
