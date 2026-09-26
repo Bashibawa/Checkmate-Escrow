@@ -353,3 +353,8 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 - [Lichess](https://lichess.org) for their open API
 - [Chess.com](https://chess.com) for their developer platform
 - Drips Wave for supporting public goods funding
+
+## Handsoff notes
+
+<!-- handsoff-issue-1536 -->
+- #1536: Fix: `admin_resolve_stalled_match` emits `match/cancelled` for a Completed match
