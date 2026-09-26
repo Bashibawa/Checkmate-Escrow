@@ -143,6 +143,7 @@ async fn main() {
         cfg.rpc_url.clone(),
         cfg.network_passphrase.clone(),
         &cfg.contract_escrow,
+        cfg.max_fee_stroops,
     ) {
         Ok(s) => Arc::new(s),
         Err(e) => {

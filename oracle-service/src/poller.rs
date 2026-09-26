@@ -86,6 +86,7 @@ impl Poller {
             cfg.rpc_url.clone(),
             cfg.network_passphrase.clone(),
             &cfg.contract_escrow,
+            cfg.max_fee_stroops,
         )?;
 
         let chess_com =
@@ -125,6 +126,7 @@ impl Poller {
             cfg.rpc_url.clone(),
             cfg.network_passphrase.clone(),
             &cfg.contract_escrow,
+            cfg.max_fee_stroops,
         )?;
 
         let chess_com =
@@ -167,6 +169,7 @@ impl Poller {
             cfg.rpc_url.clone(),
             cfg.network_passphrase.clone(),
             &cfg.contract_escrow,
+            cfg.max_fee_stroops,
         )?;
 
         let chess_com = ChessComClient::new_with_base_and_timeout(

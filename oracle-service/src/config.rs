@@ -109,6 +109,10 @@ pub struct OracleConfig {
     ///
     /// Defaults to `ORACLE_DEAD_LETTER_MAX_ENTRIES` env var, or 1000 if unset.
     pub dead_letter_max_entries: usize,
+    /// Maximum oracle transaction fee (stroops) to protect against fee spikes.
+    /// Submission will fail if the calculated fee exceeds this limit.
+    /// Defaults to `ORACLE_MAX_FEE_STROOPS` env var, or 1_000_000 (0.1 XLM) if unset.
+    pub max_fee_stroops: u32,
 }
 
 impl fmt::Debug for OracleConfig {
@@ -141,6 +145,7 @@ impl fmt::Debug for OracleConfig {
                 &self.reconciliation_interval_secs,
             )
             .field("dead_letter_max_entries", &self.dead_letter_max_entries)
+            .field("max_fee_stroops", &self.max_fee_stroops)
             .finish()
     }
 }
@@ -174,6 +179,7 @@ pub enum ConfigError {
 /// - `ORACLE_QUEUE_DIR` (default: `./oracle-queue`)
 /// - `ORACLE_RECONCILIATION_INTERVAL_SECS` (default: 60)
 /// - `ORACLE_DEAD_LETTER_MAX_ENTRIES` (default: 1000; 0 = unlimited)
+/// - `ORACLE_MAX_FEE_STROOPS` (default: 1000000; protects against fee spikes)
 /// - `ORACLE_ADMIN_ALLOWED_IPS` — comma-separated CIDR ranges permitted to
 ///   reach `/admin/*` endpoints (default: empty, i.e. deny-all). See
 ///   [`crate::middleware::ip_allowlist`].
@@ -236,6 +242,7 @@ pub fn load() -> Result<OracleConfig, ConfigError> {
         std::env::var("ORACLE_QUEUE_DIR").unwrap_or_else(|_| "./oracle-queue".to_string());
     let reconciliation_interval_secs = parse_u64_env("ORACLE_RECONCILIATION_INTERVAL_SECS", 60)?;
     let dead_letter_max_entries = parse_usize_env("ORACLE_DEAD_LETTER_MAX_ENTRIES", 1000)?;
+    let max_fee_stroops = parse_u32_env("ORACLE_MAX_FEE_STROOPS", 1_000_000)?;
 
     Ok(OracleConfig {
         rpc_url,
@@ -253,6 +260,7 @@ pub fn load() -> Result<OracleConfig, ConfigError> {
         queue_dir,
         reconciliation_interval_secs,
         dead_letter_max_entries,
+        max_fee_stroops,
     })
 }
 
@@ -398,5 +406,22 @@ mod tests {
         let v = parse_u64_env("ORACLE_CHESSDOTCOM_POLL_INTERVAL_SECS", 60).unwrap();
         assert_eq!(v, 120);
         std::env::remove_var("ORACLE_CHESSDOTCOM_POLL_INTERVAL_SECS");
+    }
+
+    #[test]
+    fn max_fee_stroops_default() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ORACLE_MAX_FEE_STROOPS");
+        let v = parse_u32_env("ORACLE_MAX_FEE_STROOPS", 1_000_000).unwrap();
+        assert_eq!(v, 1_000_000, "default max_fee_stroops should be 1_000_000");
+    }
+
+    #[test]
+    fn max_fee_stroops_override() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ORACLE_MAX_FEE_STROOPS", "5000000");
+        let v = parse_u32_env("ORACLE_MAX_FEE_STROOPS", 1_000_000).unwrap();
+        assert_eq!(v, 5_000_000);
+        std::env::remove_var("ORACLE_MAX_FEE_STROOPS");
     }
 }
