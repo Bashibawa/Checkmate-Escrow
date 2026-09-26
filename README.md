@@ -361,3 +361,6 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 <!-- handsoff-issue-1521 -->
 - #1521: Fix: overturned dispute pays a draw but leaves `m.winner` set to the original oracle winner
+
+<!-- handsoff-issue-1522 -->
+- #1522: Security: multi-token refunds pay player2 in `token_b` although every deposit is collected in `token`
