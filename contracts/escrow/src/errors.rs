@@ -43,6 +43,8 @@ pub enum Error {
     DisputeNotFound = 24,
     PendingResultNotFound = 25,
     DisputeAlreadyResolved = 26,
+    /// The dispute voting window has elapsed. Also returned by `dispute_oracle_result`
+    /// when the dispute period has elapsed (`env.ledger().sequence() >= deadline`).
     VotingPeriodElapsed = 27,
     AlreadyVoted = 28,
     NotStaker = 29,
