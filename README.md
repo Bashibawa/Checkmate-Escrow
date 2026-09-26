@@ -353,3 +353,8 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 - [Lichess](https://lichess.org) for their open API
 - [Chess.com](https://chess.com) for their developer platform
 - Drips Wave for supporting public goods funding
+
+## Handsoff notes
+
+<!-- handsoff-issue-1528 -->
+- #1528: Security: `deposit_batch` and `submit_result_batch` keep partial state writes when an entry fails
