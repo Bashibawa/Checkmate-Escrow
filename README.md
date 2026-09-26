@@ -358,3 +358,6 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 <!-- handsoff-issue-1528 -->
 - #1528: Security: `deposit_batch` and `submit_result_batch` keep partial state writes when an entry fails
+
+<!-- handsoff-issue-1530 -->
+- #1530: Fix: `settle_result` updates stats and payout counters before the dispute period ends
