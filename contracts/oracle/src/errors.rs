@@ -63,4 +63,12 @@ pub enum Error {
     /// `finalize_slash` was called before `slashing_grace_period_ledgers`
     /// ledgers have elapsed since the slash was staged.
     SlashGracePeriodNotElapsed = 24,
+    /// `slash_oracle` was called for an (oracle, match_id) pair that already
+    /// has a pending slash. Call `admin_cancel_slash` first to clear it, or
+    /// call `finalize_slash` to execute the existing slash before staging a
+    /// new one.
+    SlashAlreadyPending = 25,
+    /// `accept_admin` was called but there is no pending admin proposal
+    /// initiated by the current admin. Call `propose_admin` first.
+    NoPendingAdmin = 26,
 }

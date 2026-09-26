@@ -23,8 +23,8 @@ use errors::Error;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, String, Symbol, Vec};
 use types::{
     BatchResultEntry, CandidateTally, ConsensusState, DataKey, OracleMetrics, OracleRegistration,
-    OracleSubmissionEntry, OracleVoteRecord, PendingSlash, Platform, RateLimitConfig,
-    RateLimitStatus, RateWindow, ResultEntry, Winner,
+    OracleSubmissionEntry, OracleVoteRecord, PendingAdminProposal, PendingSlash, Platform,
+    RateLimitConfig, RateLimitStatus, RateWindow, ResultEntry, Winner,
 };
 
 /// Maximum response time SLA threshold, in milliseconds (5 seconds).
@@ -230,6 +230,12 @@ impl OracleContract {
     /// `match_id` is the match whose result triggered the slash, and is
     /// used only as an identifier for the pending slash (an oracle can have
     /// at most one pending slash per match).
+    ///
+    /// # Errors
+    /// - [`Error::SlashAlreadyPending`] — a slash for this `(oracle_address, match_id)` pair
+    ///   is already staged and has not yet been finalized or cancelled. Call
+    ///   [`Self::admin_cancel_slash`] to cancel it, or [`Self::finalize_slash`] to execute it
+    ///   before staging a new slash.
     pub fn slash_oracle(
         env: Env,
         oracle_address: Address,
@@ -243,6 +249,17 @@ impl OracleContract {
             .get(&DataKey::Admin)
             .ok_or(Error::Unauthorized)?;
         admin.require_auth();
+
+        // Reject if a pending slash already exists for this (oracle, match_id) pair.
+        // Silently overwriting would reset `eligible_ledger`, potentially shortening or
+        // extending the governance grace window unintentionally.
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::PendingSlash(oracle_address.clone(), match_id))
+        {
+            return Err(Error::SlashAlreadyPending);
+        }
 
         let registration: OracleRegistration = env
             .storage()
@@ -1509,6 +1526,11 @@ impl OracleContract {
     /// Rotate the admin to a new address. Requires current admin auth.
     /// Emits an `admin / admin_rot` event with `(old_admin, new_admin)`.
     ///
+    /// # Deprecated
+    /// This function transfers admin immediately with no acceptance from the new address.
+    /// Prefer [`Self::propose_admin`] + [`Self::accept_admin`] for a safer two-step transfer
+    /// that prevents accidental transfers to unreachable addresses.
+    ///
     /// # Errors
     /// - [`Error::Unauthorized`] — contract has not been initialized or caller is not the current admin.
     pub fn update_admin(env: Env, new_admin: Address) -> Result<(), Error> {
@@ -1523,6 +1545,84 @@ impl OracleContract {
         env.events().publish(
             (Symbol::new(&env, "admin"), symbol_short!("admin_rot")),
             (current_admin, new_admin),
+        );
+        Ok(())
+    }
+
+    /// Propose a new admin in a two-step transfer. Current admin only.
+    ///
+    /// Stores the nomination without transferring authority. The nominated
+    /// address must call [`Self::accept_admin`] to complete the transfer.
+    /// This prevents accidental transfers to an unreachable or wrong address.
+    ///
+    /// Emits an `admin / propose` event with the nominated `new_admin` address.
+    ///
+    /// # Errors
+    /// - [`Error::Unauthorized`] — contract has not been initialized or caller is not the current admin.
+    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        extend_instance_ttl(&env);
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+        current_admin.require_auth();
+
+        env.storage().instance().set(
+            &DataKey::PendingAdmin,
+            &PendingAdminProposal {
+                proposer: current_admin,
+                pending_admin: new_admin.clone(),
+            },
+        );
+        env.events().publish(
+            (Symbol::new(&env, "admin"), symbol_short!("propose")),
+            new_admin,
+        );
+        Ok(())
+    }
+
+    /// Accept a pending admin proposal. Pending admin only.
+    ///
+    /// Finalizes the two-step transfer initiated by [`Self::propose_admin`],
+    /// replacing the current admin with the caller. Clears the pending
+    /// proposal so a second call cannot replay the transfer.
+    ///
+    /// Emits an `admin / xfer` event with the new admin address.
+    ///
+    /// # Errors
+    /// - [`Error::NoPendingAdmin`] — no proposal exists (never proposed, already accepted, or
+    ///   already cancelled by a subsequent `propose_admin` call with a different nominee).
+    /// - [`Error::Unauthorized`] — caller is not the nominated pending admin, or the proposer
+    ///   is no longer the current admin.
+    pub fn accept_admin(env: Env) -> Result<(), Error> {
+        extend_instance_ttl(&env);
+        let proposal: PendingAdminProposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(Error::NoPendingAdmin)?;
+        proposal.pending_admin.require_auth();
+
+        // Guard against a scenario where the admin rotated (via `update_admin`) between
+        // `propose_admin` and `accept_admin`, which would make the proposer stale.
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+        if current_admin != proposal.proposer {
+            return Err(Error::Unauthorized);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Admin, &proposal.pending_admin);
+        // Remove the proposal so a second `accept_admin` call cannot replay the transfer.
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events().publish(
+            (Symbol::new(&env, "admin"), symbol_short!("xfer")),
+            proposal.pending_admin,
         );
         Ok(())
     }

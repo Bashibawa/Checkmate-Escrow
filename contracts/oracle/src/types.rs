@@ -136,6 +136,9 @@ pub enum DataKey {
     /// A staged slash awaiting the grace period before it can be finalized,
     /// keyed by (oracle_address, match_id).
     PendingSlash(Address, u64),
+    /// A pending two-step admin transfer proposal, set by `propose_admin`
+    /// and consumed (or left to expire) by `accept_admin`.
+    PendingAdmin,
 }
 
 /// A slash that has been staged but not yet finalized, pending
@@ -153,6 +156,17 @@ pub struct PendingSlash {
     /// Ledger sequence number at which the slash becomes eligible for
     /// finalization (`staged_ledger + slashing_grace_period_ledgers`).
     pub eligible_ledger: u32,
+}
+
+/// A two-step admin transfer proposal, stored while waiting for the
+/// nominated address to accept via `accept_admin`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAdminProposal {
+    /// Address that created the proposal (the current admin at proposal time).
+    pub proposer: Address,
+    /// Nominated new admin that must call `accept_admin` to complete the transfer.
+    pub pending_admin: Address,
 }
 
 /// A single entry in an oracle's per-address submission history.
