@@ -248,45 +248,71 @@ fn test_referral_fee_draw_no_referral_payment() {
     );
 }
 
-/// `create_match_with_referrer` must enforce `stablecoin_only_mode` just like
-/// the other `create_match*` variants: supplying a referrer must not bypass the
-/// stablecoin restriction.
+/// `create_match_with_referrer` must reject a referrer that is player1.
 #[test]
-fn test_create_match_with_referrer_rejects_non_stablecoin_in_stablecoin_only_mode() {
-    let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
+fn test_create_match_with_referrer_rejects_player1_as_referrer() {
+    let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);
-
-    client.set_protocol_config(&ProtocolConfig {
-        vesting_duration_seconds: 0,
-        cancellation_fee_basis_points: 200,
-        treasury: admin.clone(),
-        stablecoin_only_mode: true,
-        maximum_stake: None,
-        match_timeout_seconds: crate::DEFAULT_MATCH_TIMEOUT_SECONDS,
-        protocol_fee_bps: 0,
-        fee_recipient: admin.clone(),
-        minimum_stake: crate::DEFAULT_MINIMUM_STAKE,
-        max_protocol_fee: None,
-        dispute_bond_tier_schedule: soroban_sdk::vec![&env],
-    });
-
-    let referrer = Address::generate(&env);
 
     let result = client.try_create_match_with_referrer(
         &player1,
         &player2,
         &100,
         &token,
-        &soroban_sdk::String::from_str(&env, "stablecoin-bypass"),
+        &soroban_sdk::String::from_str(&env, "ref-p1"),
         &Platform::Lichess,
-        &referrer,
+        &player1,
     );
 
     assert_eq!(
         result,
-        Err(Ok(Error::NotStablecoin)),
-        "create_match_with_referrer must reject non-stablecoin tokens in stablecoin-only mode"
+        Err(Ok(Error::InvalidAddress)),
+        "referrer == player1 must be rejected with InvalidAddress"
     );
 }
 
-/// Default referral share is 20% (2000
+/// `create_match_with_referrer` must reject a referrer that is player2.
+#[test]
+fn test_create_match_with_referrer_rejects_player2_as_referrer() {
+    let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let result = client.try_create_match_with_referrer(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &soroban_sdk::String::from_str(&env, "ref-p2"),
+        &Platform::Lichess,
+        &player2,
+    );
+
+    assert_eq!(
+        result,
+        Err(Ok(Error::InvalidAddress)),
+        "referrer == player2 must be rejected with InvalidAddress"
+    );
+}
+
+/// `create_match_with_referrer` must reject the contract itself as referrer.
+#[test]
+fn test_create_match_with_referrer_rejects_contract_as_referrer() {
+    let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let result = client.try_create_match_with_referrer(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &soroban_sdk::String::from_str(&env, "ref-contract"),
+        &Platform::Lichess,
+        &contract_id,
+    );
+
+    assert_eq!(
+        result,
+        Err(Ok(Error::InvalidAddress)),
+        "referrer == current_contract_address() must be rejected with InvalidAddress"
+    );
+}
