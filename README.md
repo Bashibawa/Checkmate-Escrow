@@ -358,3 +358,6 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 <!-- handsoff-issue-1532 -->
 - #1532: Security: match participants can vote on their own dispute
+
+<!-- handsoff-issue-1534 -->
+- #1534: Fix: disputes record the base oracle instead of the effective (temporary) oracle
