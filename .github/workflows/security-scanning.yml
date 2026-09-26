@@ -38,15 +38,15 @@ jobs:
   # ── 1. cargo-audit — known vulnerable dependencies ─────────────────────────
   cargo-audit:
     name: cargo-audit (Vulnerable Dependencies)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -77,7 +77,7 @@ jobs:
 
       - name: Upload cargo-audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cargo-audit-report
           path: reports/security/cargo-audit.json
@@ -92,9 +92,9 @@ jobs:
   # ── 2. cargo-deny — license compliance + bans ──────────────────────────────
   cargo-deny:
     name: cargo-deny (License Compliance)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked --quiet
@@ -114,7 +114,7 @@ jobs:
 
       - name: Upload cargo-deny report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cargo-deny-report
           path: reports/security/cargo-deny.txt
@@ -123,11 +123,11 @@ jobs:
   # ── 3. semgrep SAST — code pattern violations ──────────────────────────────
   semgrep:
     name: semgrep (SAST)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Run semgrep
         id: semgrep
@@ -165,7 +165,7 @@ jobs:
 
       - name: Upload semgrep report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: semgrep-report
           path: reports/security/semgrep.json
@@ -180,14 +180,14 @@ jobs:
   # ── 4. Security report (merge to main only) ─────────────────────────────────
   security-report:
     name: Generate Security Report
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     needs: [cargo-audit, cargo-deny, semgrep]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download all security artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: reports/security/
 
@@ -234,7 +234,7 @@ jobs:
           cat reports/security/SECURITY_REPORT_${SHORT_SHA}.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload consolidated report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: security-report-${{ github.sha }}
           path: reports/security/
