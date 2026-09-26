@@ -137,6 +137,7 @@ async fn main() {
 
     let poll_interval = cfg.poll_interval_secs;
     let reconciliation_interval = cfg.reconciliation_interval_secs;
+    let http_addr = cfg.http_addr.clone();
 
     // ── Initialize dependencies ───────────────────────────────────────────
     let soroban = match SorobanClient::new(
@@ -208,17 +209,17 @@ async fn main() {
             waf::waf_middleware,
         ));
 
-    let listener = match tokio::net::TcpListener::bind("0.0.0.0:8000").await {
+    let listener = match tokio::net::TcpListener::bind(&http_addr).await {
         Ok(l) => l,
         Err(e) => {
-            error!("failed to bind to port 8000: {}", e);
+            error!("failed to bind to {}: {}", http_addr, e);
             std::process::exit(1);
         }
     };
 
-    info!("oracle service listening on http://0.0.0.0:8000");
-    info!("API docs available at http://0.0.0.0:8000/api/docs");
-    info!("Prometheus metrics available at http://0.0.0.0:8000/metrics");
+    info!("oracle service listening on http://{}", http_addr);
+    info!("API docs available at http://{}/api/docs", http_addr);
+    info!("Prometheus metrics available at http://{}/metrics", http_addr);
 
     // ── Run all four tasks concurrently ─────────────────────────────────────
     tokio::select! {

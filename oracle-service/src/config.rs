@@ -113,6 +113,9 @@ pub struct OracleConfig {
     /// Submission will fail if the calculated fee exceeds this limit.
     /// Defaults to `ORACLE_MAX_FEE_STROOPS` env var, or 1_000_000 (0.1 XLM) if unset.
     pub max_fee_stroops: u32,
+    /// HTTP server bind address (host:port).
+    /// Defaults to `ORACLE_HTTP_ADDR` env var, or `0.0.0.0:8000` if unset.
+    pub http_addr: String,
 }
 
 impl fmt::Debug for OracleConfig {
@@ -146,6 +149,7 @@ impl fmt::Debug for OracleConfig {
             )
             .field("dead_letter_max_entries", &self.dead_letter_max_entries)
             .field("max_fee_stroops", &self.max_fee_stroops)
+            .field("http_addr", &self.http_addr)
             .finish()
     }
 }
@@ -180,6 +184,7 @@ pub enum ConfigError {
 /// - `ORACLE_RECONCILIATION_INTERVAL_SECS` (default: 60)
 /// - `ORACLE_DEAD_LETTER_MAX_ENTRIES` (default: 1000; 0 = unlimited)
 /// - `ORACLE_MAX_FEE_STROOPS` (default: 1000000; protects against fee spikes)
+/// - `ORACLE_HTTP_ADDR` (default: `0.0.0.0:8000`; HTTP server bind address)
 /// - `ORACLE_ADMIN_ALLOWED_IPS` — comma-separated CIDR ranges permitted to
 ///   reach `/admin/*` endpoints (default: empty, i.e. deny-all). See
 ///   [`crate::middleware::ip_allowlist`].
@@ -243,6 +248,7 @@ pub fn load() -> Result<OracleConfig, ConfigError> {
     let reconciliation_interval_secs = parse_u64_env("ORACLE_RECONCILIATION_INTERVAL_SECS", 60)?;
     let dead_letter_max_entries = parse_usize_env("ORACLE_DEAD_LETTER_MAX_ENTRIES", 1000)?;
     let max_fee_stroops = parse_u32_env("ORACLE_MAX_FEE_STROOPS", 1_000_000)?;
+    let http_addr = std::env::var("ORACLE_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:8000".to_string());
 
     Ok(OracleConfig {
         rpc_url,
@@ -261,6 +267,7 @@ pub fn load() -> Result<OracleConfig, ConfigError> {
         reconciliation_interval_secs,
         dead_letter_max_entries,
         max_fee_stroops,
+        http_addr,
     })
 }
 
