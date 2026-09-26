@@ -358,3 +358,6 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 <!-- handsoff-issue-1520 -->
 - #1520: Security: `finalize_match` pays out but `claim_vested_payout` can pay the same match again
+
+<!-- handsoff-issue-1521 -->
+- #1521: Fix: overturned dispute pays a draw but leaves `m.winner` set to the original oracle winner
