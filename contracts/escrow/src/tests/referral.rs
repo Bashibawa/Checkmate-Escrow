@@ -248,42 +248,45 @@ fn test_referral_fee_draw_no_referral_payment() {
     );
 }
 
-/// Default referral share is 20% (2000 bps).
+/// `create_match_with_referrer` must enforce `stablecoin_only_mode` just like
+/// the other `create_match*` variants: supplying a referrer must not bypass the
+/// stablecoin restriction.
 #[test]
-fn test_get_referral_share_bps_default() {
-    let (env, contract_id, _oracle, _player1, _player2, _token, _admin) = setup();
-    let client = EscrowContractClient::new(&env, &contract_id);
-    assert_eq!(client.get_referral_share_bps(), 2000);
-}
-
-/// `set_referral_share_bps` updates the stored value.
-#[test]
-fn test_set_referral_share_bps_updates_value() {
-    let (env, contract_id, _oracle, _player1, _player2, _token, _admin) = setup();
+fn test_create_match_with_referrer_rejects_non_stablecoin_in_stablecoin_only_mode() {
+    let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);
 
-    client.set_referral_share_bps(&5000);
-    assert_eq!(client.get_referral_share_bps(), 5000);
-}
+    client.set_protocol_config(&ProtocolConfig {
+        vesting_duration_seconds: 0,
+        cancellation_fee_basis_points: 200,
+        treasury: admin.clone(),
+        stablecoin_only_mode: true,
+        maximum_stake: None,
+        match_timeout_seconds: crate::DEFAULT_MATCH_TIMEOUT_SECONDS,
+        protocol_fee_bps: 0,
+        fee_recipient: admin.clone(),
+        minimum_stake: crate::DEFAULT_MINIMUM_STAKE,
+        max_protocol_fee: None,
+        dispute_bond_tier_schedule: soroban_sdk::vec![&env],
+    });
 
-/// `create_match` (without referrer) leaves referrer as None.
-#[test]
-fn test_create_match_without_referrer_has_none() {
-    let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
-    let client = EscrowContractClient::new(&env, &contract_id);
+    let referrer = Address::generate(&env);
 
-    let match_id = client.create_match(
+    let result = client.try_create_match_with_referrer(
         &player1,
         &player2,
         &100,
         &token,
-        &soroban_sdk::String::from_str(&env, "b0911c7c"),
+        &soroban_sdk::String::from_str(&env, "stablecoin-bypass"),
         &Platform::Lichess,
+        &referrer,
     );
 
-    let m = client.get_match(&match_id);
     assert_eq!(
-        m.referrer, None,
-        "standard create_match should have no referrer"
+        result,
+        Err(Ok(Error::NotStablecoin)),
+        "create_match_with_referrer must reject non-stablecoin tokens in stablecoin-only mode"
     );
 }
+
+/// Default referral share is 20% (2000
