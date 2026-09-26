@@ -83,6 +83,68 @@ fn test_create_match_with_empty_game_id_rejected() {
 }
 
 #[test]
+fn test_create_match_with_conversion_invalid_lichess_game_id_rejected() {
+    let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let result = client.try_create_match_with_conversion(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &String::from_str(&env, "not-a-valid-lichess-id"),
+        &Platform::Lichess,
+    );
+
+    assert!(
+        result.is_err(),
+        "conversion match creation with invalid Lichess game_id must be rejected"
+    );
+}
+
+#[test]
+fn test_create_match_with_conversion_invalid_chess_com_game_id_rejected() {
+    let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let result = client.try_create_match_with_conversion(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &String::from_str(&env, "not-a-valid-chess-com-id"),
+        &Platform::ChessCom,
+    );
+
+    assert!(
+        result.is_err(),
+        "conversion match creation with invalid Chess.com game_id must be rejected"
+    );
+}
+
+#[test]
+fn test_create_match_with_conversion_tier_violating_stake_rejected() {
+    let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let excessive_stake = i128::MAX;
+
+    let result = client.try_create_match_with_conversion(
+        &player1,
+        &player2,
+        &excessive_stake,
+        &token,
+        &String::from_str(&env, "c12c3c42"),
+        &Platform::Lichess,
+    );
+
+    assert!(
+        result.is_err(),
+        "conversion match creation with tier-violating stake must be rejected"
+    );
+}
+
+#[test]
 fn test_deposit_insufficient_balance_rejected() {
     let (env, contract_id, _oracle, _player1, player2, token, _admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);

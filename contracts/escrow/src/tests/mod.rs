@@ -208,3 +208,4 @@ mod issue_1343;
 mod issue_1344;
 mod issue_1345;
 mod player_rating;
+mod issue_1525;
