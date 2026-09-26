@@ -353,3 +353,8 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 - [Lichess](https://lichess.org) for their open API
 - [Chess.com](https://chess.com) for their developer platform
 - Drips Wave for supporting public goods funding
+
+## Handsoff notes
+
+<!-- handsoff-issue-1520 -->
+- #1520: Security: `finalize_match` pays out but `claim_vested_payout` can pay the same match again
