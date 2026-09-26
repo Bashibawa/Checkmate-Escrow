@@ -33,9 +33,10 @@ export class EventPoller {
     private readonly onEvent: EventCallback,
   ) {}
 
-  start(): void {
+  async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    await this.initializeWatermark();
     this.scheduleNext(0); // first poll immediately
   }
 
@@ -48,6 +49,28 @@ export class EventPoller {
   }
 
   // ─── Internal ──────────────────────────────────────────────────────────
+
+  private async initializeWatermark(): Promise<void> {
+    try {
+      const events = await this.fetchNewEvents();
+      if (events.length > 0) {
+        const lastEvent = events[events.length - 1]!;
+        this.highWatermark = {
+          ledger: lastEvent.ledger_sequence,
+          index: lastEvent.event_index_in_txn ?? 0,
+        };
+        logger.info(
+          { ledger: this.highWatermark.ledger, index: this.highWatermark.index },
+          'EventPoller initialized watermark from latest indexed ledger',
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { err },
+        'EventPoller failed to initialize watermark; will start from beginning',
+      );
+    }
+  }
 
   private scheduleNext(delayMs: number): void {
     this.timer = setTimeout(() => {

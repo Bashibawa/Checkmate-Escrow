@@ -264,7 +264,7 @@ describe('EventPoller', () => {
       await vi.advanceTimersByTimeAsync(200);
       expect(callCount).toBe(0);
 
-      poller.start();
+      await poller.start();
       await vi.advanceTimersByTimeAsync(200);
       expect(callCount).toBe(1);
 
@@ -277,11 +277,91 @@ describe('EventPoller', () => {
       const config = buildConfig(indexerPort);
       const poller = new EventPoller(config, () => {});
 
-      poller.start();
-      poller.start();
-      poller.start();
+      await poller.start();
+      await poller.start();
+      await poller.start();
 
       await vi.advanceTimersByTimeAsync(200);
+
+      poller.stop();
+    });
+  });
+
+  describe('watermark initialization', () => {
+    it('initializes watermark from latest indexed ledger on start', async () => {
+      const config = buildConfig(indexerPort);
+      const events: IndexedEvent[] = [];
+      const poller = new EventPoller(config, (event) => events.push(event));
+
+      // Pre-populate indexer with historical events
+      indexer.setEvents([
+        makeEvent({ ledger_sequence: 100, event_index_in_txn: 0, id: 'old1' }),
+        makeEvent({ ledger_sequence: 100, event_index_in_txn: 1, id: 'old2' }),
+        makeEvent({ ledger_sequence: 101, event_index_in_txn: 0, id: 'old3' }),
+      ]);
+
+      await poller.start();
+
+      // Historical events should not be emitted after initialization
+      await vi.advanceTimersByTimeAsync(200);
+      expect(events).toHaveLength(0);
+
+      // New events should be emitted
+      indexer.setEvents([
+        makeEvent({ ledger_sequence: 100, event_index_in_txn: 0, id: 'old1' }),
+        makeEvent({ ledger_sequence: 100, event_index_in_txn: 1, id: 'old2' }),
+        makeEvent({ ledger_sequence: 101, event_index_in_txn: 0, id: 'old3' }),
+        makeEvent({ ledger_sequence: 102, event_index_in_txn: 0, id: 'new' }),
+      ]);
+
+      await vi.advanceTimersByTimeAsync(200);
+      expect(events).toHaveLength(1);
+      expect(events[0]?.id).toBe('new');
+
+      poller.stop();
+    });
+
+    it('does not replay historical events after restart', async () => {
+      const config = buildConfig(indexerPort);
+      const events: IndexedEvent[] = [];
+      const poller = new EventPoller(config, (event) => events.push(event));
+
+      indexer.setEvents([
+        makeEvent({ ledger_sequence: 100, event_index_in_txn: 0, id: 'evt1' }),
+        makeEvent({ ledger_sequence: 101, event_index_in_txn: 0, id: 'evt2' }),
+        makeEvent({ ledger_sequence: 102, event_index_in_txn: 0, id: 'evt3' }),
+      ]);
+
+      await poller.start();
+      await vi.advanceTimersByTimeAsync(200);
+
+      // Should not emit any historical events
+      expect(events).toHaveLength(0);
+
+      poller.stop();
+    });
+
+    it('handles initialization failure gracefully', async () => {
+      let fetchCount = 0;
+      const originalFetch = global.fetch;
+
+      global.fetch = vi.fn(async () => {
+        fetchCount++;
+        throw new Error('Network error during init');
+      });
+
+      const config = buildConfig(indexerPort);
+      const events: IndexedEvent[] = [];
+      const poller = new EventPoller(config, (event) => events.push(event));
+
+      await poller.start();
+
+      // Should not throw, will start from beginning
+      global.fetch = originalFetch;
+      indexer.setEvents([makeEvent({ id: 'evt' })]);
+
+      await vi.advanceTimersByTimeAsync(200);
+      expect(events).toHaveLength(1);
 
       poller.stop();
     });
