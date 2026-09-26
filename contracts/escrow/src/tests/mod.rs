@@ -35,6 +35,7 @@ mod player_balance_history;
 mod player_freeze;
 mod referral;
 mod security;
+mod security_issues_1516_1519;
 mod slash_relay_tests;
 mod snapshots;
 mod tier;

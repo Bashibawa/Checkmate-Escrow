@@ -275,7 +275,11 @@ fn test_admin_resolve_stalled_match_rejects_not_funded() {
 }
 
 #[test]
-fn test_heartbeat_prevents_admin_resolution() {
+fn test_heartbeat_does_not_prevent_admin_resolution_after_stall_window() {
+    // #1518 fix: admin_resolve_stalled_match now measures from activated_at,
+    // not from the player-controlled last_heartbeat. A player heartbeating at
+    // day 6 can no longer keep the 7-day window from opening once 7 days have
+    // passed from match activation.
     let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);
 
@@ -290,18 +294,21 @@ fn test_heartbeat_prevents_admin_resolution() {
     client.deposit(&id, &player1);
     client.deposit(&id, &player2);
 
-    // Advance time to 6 days (within the 7-day window).
+    // Advance time to 6 days (within the 7-day window from activation).
     advance_timestamp(&env, 6 * 24 * 60 * 60);
 
     // Player1 sends a heartbeat, refreshing last_heartbeat.
+    // Under the OLD logic this would reset the stall window.
+    // Under the NEW logic (#1518 fix) it does NOT affect the stall window.
     client.heartbeat_match(&id, &player1);
 
-    // Advance another 2 days (8 days total, but only 2 days since heartbeat).
+    // Advance another 2 days (8 days total from activation, only 2 since heartbeat).
     advance_timestamp(&env, 2 * 24 * 60 * 60);
 
-    // Admin resolution should be rejected because it's only been 2 days since heartbeat.
-    let result = client.try_admin_resolve_stalled_match(&id, &admin, &Winner::Draw);
-    assert_eq!(result, Err(Ok(Error::MatchNotExpired)));
+    // Admin resolution must SUCCEED because 8 days have passed since activation,
+    // even though only 2 days have passed since the last heartbeat.
+    client.admin_resolve_stalled_match(&id, &admin, &Winner::Draw);
+    assert_eq!(client.get_match(&id).state, MatchState::Completed);
 }
 
 #[test]
