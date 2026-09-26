@@ -358,3 +358,6 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 <!-- handsoff-issue-1536 -->
 - #1536: Fix: `admin_resolve_stalled_match` emits `match/cancelled` for a Completed match
+
+<!-- handsoff-issue-1539 -->
+- #1539: Fix: admins can set `minimum_stake` above `maximum_stake`
