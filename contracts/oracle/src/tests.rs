@@ -191,6 +191,89 @@ fn test_finalize_slash_succeeds_immediately_with_zero_grace_period() {
     assert!(client.get_pending_slash(&oracle_admin, &0u64).is_none());
 }
 
+// #1577 — slash_oracle must return SlashAlreadyPending if a pending slash already
+// exists for the same (oracle, match_id) pair, preventing a silent overwrite that
+// would reset `eligible_ledger` and shorten/extend the governance grace window.
+#[test]
+fn test_slash_oracle_returns_error_if_pending_slash_exists() {
+    let (env, contract_id, .., oracle_admin, _, _, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+    let asset_client = StellarAssetClient::new(&env, &token_addr);
+
+    asset_client.mint(&oracle_admin, &300);
+    client.register_oracle_with_stake(&oracle_admin, &300i128, &token_addr);
+    client.set_slashing_grace_period(&100u32);
+
+    // Stage the first slash — must succeed.
+    client.slash_oracle(&oracle_admin, &0u64, &75i128);
+    assert!(
+        client.get_pending_slash(&oracle_admin, &0u64).is_some(),
+        "first slash should be staged"
+    );
+
+    // Staging a second slash for the same (oracle, match_id) must fail.
+    let result = client.try_slash_oracle(&oracle_admin, &0u64, &50i128);
+    assert!(
+        result.is_err(),
+        "second slash_oracle call must return an error when pending slash exists"
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        Error::SlashAlreadyPending,
+        "expected SlashAlreadyPending error"
+    );
+
+    // The original pending slash must be unchanged.
+    let pending = client.get_pending_slash(&oracle_admin, &0u64).unwrap();
+    assert_eq!(pending.slash_amount, 75, "original slash amount must be preserved");
+}
+
+// #1577 — after cancelling a pending slash, slash_oracle must succeed for the
+// same (oracle, match_id) pair (i.e. admin_cancel_slash clears the guard).
+#[test]
+fn test_slash_oracle_succeeds_after_cancel_clears_pending_slash() {
+    let (env, contract_id, .., oracle_admin, _, _, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+    let asset_client = StellarAssetClient::new(&env, &token_addr);
+
+    asset_client.mint(&oracle_admin, &300);
+    client.register_oracle_with_stake(&oracle_admin, &300i128, &token_addr);
+    client.set_slashing_grace_period(&100u32);
+
+    client.slash_oracle(&oracle_admin, &0u64, &75i128);
+    client.admin_cancel_slash(&oracle_admin, &0u64);
+    assert!(
+        client.get_pending_slash(&oracle_admin, &0u64).is_none(),
+        "pending slash should be gone after cancel"
+    );
+
+    // Staging a new slash after cancellation must succeed.
+    client.slash_oracle(&oracle_admin, &0u64, &50i128);
+    let pending = client.get_pending_slash(&oracle_admin, &0u64).unwrap();
+    assert_eq!(pending.slash_amount, 50, "new slash should be staged after cancel");
+}
+
+// #1577 — different match_ids are independent keys; a pending slash for
+// match 0 must not block staging a slash for match 1.
+#[test]
+fn test_slash_oracle_independent_per_match_id() {
+    let (env, contract_id, .., oracle_admin, _, _, token_addr) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+    let asset_client = StellarAssetClient::new(&env, &token_addr);
+
+    asset_client.mint(&oracle_admin, &300);
+    client.register_oracle_with_stake(&oracle_admin, &300i128, &token_addr);
+    client.set_slashing_grace_period(&100u32);
+
+    // Stage slash for match 0.
+    client.slash_oracle(&oracle_admin, &0u64, &50i128);
+    // Stage slash for match 1 — must succeed independently.
+    client.slash_oracle(&oracle_admin, &1u64, &50i128);
+
+    assert!(client.get_pending_slash(&oracle_admin, &0u64).is_some());
+    assert!(client.get_pending_slash(&oracle_admin, &1u64).is_some());
+}
+
 #[test]
 fn test_register_oracle_with_stake_first_registration_unchanged() {
     // Regression: a single (first-time) registration must behave identically
@@ -1380,6 +1463,169 @@ fn test_oracle_admin_rotation() {
         },
     }]);
     client.pause();
+}
+
+// #1578 — propose_admin stores the pending admin proposal and emits a `propose` event.
+#[test]
+fn test_propose_admin_stores_pending_admin_and_emits_event() {
+    let (env, contract_id, _escrow_id, old_admin, ..) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+
+    // Authority has NOT changed — old admin is still in charge.
+    assert_eq!(client.get_admin(), old_admin, "admin must not change until accept_admin");
+
+    // Check that the `propose` event was emitted.
+    let events = env.events().all();
+    let expected_topics = soroban_sdk::vec![
+        &env,
+        Symbol::new(&env, "admin").into_val(&env),
+        symbol_short!("propose").into_val(&env),
+    ];
+    let matched = events
+        .iter()
+        .find(|(_, topics, _)| *topics == expected_topics);
+    assert!(matched.is_some(), "propose event must be emitted by propose_admin");
+
+    let (_, _, data) = matched.unwrap();
+    let ev_new: Address = soroban_sdk::TryFromVal::try_from_val(&env, &data).unwrap();
+    assert_eq!(ev_new, new_admin, "propose event must carry the nominated admin address");
+}
+
+// #1578 — accept_admin finalizes the transfer and emits an `xfer` event.
+#[test]
+fn test_accept_admin_finalizes_transfer_and_emits_event() {
+    let (env, contract_id, _escrow_id, old_admin, ..) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+
+    // Pending admin accepts.
+    client.accept_admin();
+
+    assert_eq!(
+        client.get_admin(),
+        new_admin,
+        "admin must be updated to new_admin after accept_admin"
+    );
+
+    // Old admin must no longer have admin authority.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &old_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "pause",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(
+        client.try_pause().is_err(),
+        "old admin must be rejected after accept_admin"
+    );
+
+    // Check that the `xfer` event was emitted.
+    let events = env.events().all();
+    let expected_topics = soroban_sdk::vec![
+        &env,
+        Symbol::new(&env, "admin").into_val(&env),
+        symbol_short!("xfer").into_val(&env),
+    ];
+    let matched = events
+        .iter()
+        .find(|(_, topics, _)| *topics == expected_topics);
+    assert!(matched.is_some(), "xfer event must be emitted by accept_admin");
+
+    let (_, _, data) = matched.unwrap();
+    let ev_new: Address = soroban_sdk::TryFromVal::try_from_val(&env, &data).unwrap();
+    assert_eq!(ev_new, new_admin, "xfer event must carry the new admin address");
+}
+
+// #1578 — accept_admin called without a prior propose_admin must return NoPendingAdmin.
+#[test]
+fn test_accept_admin_without_proposal_returns_error() {
+    let (env, contract_id, ..) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+
+    let result = client.try_accept_admin();
+    assert!(result.is_err(), "accept_admin must fail when no proposal exists");
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        Error::NoPendingAdmin,
+        "expected NoPendingAdmin error"
+    );
+}
+
+// #1578 — accept_admin called by the wrong address (not the nominated pending admin)
+// must be rejected with an auth failure.
+#[test]
+#[should_panic]
+fn test_accept_admin_wrong_caller_rejected() {
+    let (env, contract_id, ..) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+
+    let new_admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    client.propose_admin(&new_admin);
+
+    // Attacker tries to accept — must panic because `pending_admin.require_auth()` fails.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "accept_admin",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.accept_admin();
+}
+
+// #1578 — accept_admin must be idempotency-safe: after acceptance, the proposal
+// is removed and a second accept_admin call must return NoPendingAdmin.
+#[test]
+fn test_accept_admin_cannot_be_replayed() {
+    let (env, contract_id, ..) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    client.accept_admin();
+
+    // Second accept must fail — the proposal was consumed.
+    let result = client.try_accept_admin();
+    assert!(result.is_err(), "second accept_admin call must fail");
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        Error::NoPendingAdmin,
+        "expected NoPendingAdmin error on replay"
+    );
+}
+
+// #1578 — propose_admin by a non-admin must be rejected.
+#[test]
+#[should_panic]
+fn test_propose_admin_unauthorized() {
+    let (env, contract_id, ..) = setup();
+    let client = OracleContractClient::new(&env, &contract_id);
+
+    let attacker = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "propose_admin",
+            args: (new_admin.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.propose_admin(&new_admin);
 }
 
 #[test]
