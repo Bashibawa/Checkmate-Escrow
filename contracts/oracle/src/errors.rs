@@ -37,6 +37,10 @@ pub enum Error {
     /// `submit_oracle_result` was called by an address that has never
     /// registered via `register_oracle_with_stake`.
     NotRegisteredOracle = 12,
+    /// `pause` was called on an already-paused contract, or `unpause` was
+    /// called on a contract that is not currently paused. Prevents duplicate
+    /// state transitions and spurious events.
+    InvalidPauseState = 13,
     /// The match's m-of-n consensus has deadlocked (no remaining eligible
     /// oracle vote can push any candidate result over the threshold) and is
     /// awaiting admin resolution via `resolve_disputed_match`.
@@ -63,12 +67,12 @@ pub enum Error {
     /// `finalize_slash` was called before `slashing_grace_period_ledgers`
     /// ledgers have elapsed since the slash was staged.
     SlashGracePeriodNotElapsed = 24,
-    /// `slash_oracle` was called for an (oracle, match_id) pair that already
-    /// has a pending slash. Call `admin_cancel_slash` first to clear it, or
-    /// call `finalize_slash` to execute the existing slash before staging a
-    /// new one.
-    SlashAlreadyPending = 25,
-    /// `accept_admin` was called but there is no pending admin proposal
-    /// initiated by the current admin. Call `propose_admin` first.
-    NoPendingAdmin = 26,
+    /// No rate has been set for the requested `(token_a, token_b)` pair via
+    /// `set_rate`. Replaces the misleading `ResultNotFound` previously
+    /// returned by `get_rate` and `swap`.
+    RateNotFound = 25,
+    /// The rate supplied to `set_rate` is not positive (zero or negative
+    /// values are economically meaningless). Replaces the misleading
+    /// `InvalidRateLimit` previously returned by `set_rate`.
+    InvalidRate = 26,
 }

@@ -97,6 +97,18 @@ pub struct ConsensusState {
     pub disputed: bool,
 }
 
+/// A stored exchange rate entry, pairing the rate value with the ledger
+/// sequence at which it was last set. Allows callers to detect stale rates
+/// before executing a swap.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RateEntry {
+    /// Exchange rate: units of token_b per unit of token_a, scaled by 1e7.
+    pub rate: i128,
+    /// Ledger sequence number at which `set_rate` stored this rate.
+    pub updated_ledger: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -110,6 +122,7 @@ pub enum DataKey {
     OracleHourlyWindow(Address),
     /// Sliding window submission counters for the daily limit, keyed by oracle address.
     OracleDailyWindow(Address),
+    /// Exchange rate entry for a (token_a, token_b) pair, storing (rate, updated_ledger).
     Rate(Address, Address),
     /// Number of matching independent-oracle submissions required to finalize
     /// a match result via `submit_oracle_result`. Defaults to 1.
