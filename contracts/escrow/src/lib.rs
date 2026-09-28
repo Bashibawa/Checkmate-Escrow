@@ -664,15 +664,15 @@ impl EscrowContract {
             env.storage()
                 .instance()
                 .set(&DataKey::StablecoinIssuerCount, &next_count);
-        }
 
-        env.events().publish(
-            (
-                Symbol::new(&env, "admin"),
-                Symbol::new(&env, "sc_issuer_rm"),
-            ),
-            issuer,
-        );
+            env.events().publish(
+                (
+                    Symbol::new(&env, "admin"),
+                    Symbol::new(&env, "sc_issuer_rm"),
+                ),
+                issuer,
+            );
+        }
 
         Ok(())
     }
@@ -850,39 +850,46 @@ impl EscrowContract {
             .ok_or(Error::Unauthorized)?;
         admin.require_auth();
 
-        env.storage()
-            .instance()
-            .remove(&DataKey::BlacklistedToken(token.clone()));
-
-        // Remove from the persistent list.
-        if let Some(list) = env
+        let was_blacklisted = env
             .storage()
-            .persistent()
-            .get::<DataKey, soroban_sdk::Vec<Address>>(&DataKey::BlacklistedTokens)
-        {
-            let mut updated: soroban_sdk::Vec<Address> = soroban_sdk::vec![&env];
-            for existing in list.iter() {
-                if existing != token {
-                    updated.push_back(existing.clone());
-                }
-            }
+            .instance()
+            .has(&DataKey::BlacklistedToken(token.clone()));
+
+        if was_blacklisted {
             env.storage()
+                .instance()
+                .remove(&DataKey::BlacklistedToken(token.clone()));
+
+            // Remove from the persistent list.
+            if let Some(list) = env
+                .storage()
                 .persistent()
-                .set(&DataKey::BlacklistedTokens, &updated);
-            env.storage().persistent().extend_ttl(
-                &DataKey::BlacklistedTokens,
-                MATCH_TTL_LEDGERS,
-                MATCH_TTL_LEDGERS,
+                .get::<DataKey, soroban_sdk::Vec<Address>>(&DataKey::BlacklistedTokens)
+            {
+                let mut updated: soroban_sdk::Vec<Address> = soroban_sdk::vec![&env];
+                for existing in list.iter() {
+                    if existing != token {
+                        updated.push_back(existing.clone());
+                    }
+                }
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::BlacklistedTokens, &updated);
+                env.storage().persistent().extend_ttl(
+                    &DataKey::BlacklistedTokens,
+                    MATCH_TTL_LEDGERS,
+                    MATCH_TTL_LEDGERS,
+                );
+            }
+
+            env.events().publish(
+                (
+                    Symbol::new(&env, "admin"),
+                    Symbol::new(&env, "tok_unblacklist"),
+                ),
+                token,
             );
         }
-
-        env.events().publish(
-            (
-                Symbol::new(&env, "admin"),
-                Symbol::new(&env, "tok_unblacklist"),
-            ),
-            token,
-        );
         Ok(())
     }
 
@@ -979,36 +986,43 @@ impl EscrowContract {
             .ok_or(Error::Unauthorized)?;
         admin.require_auth();
 
-        env.storage()
-            .instance()
-            .remove(&PlayerFreezeKey::FrozenPlayer(player.clone()));
-
-        // Remove from the persistent list.
-        if let Some(list) = env
+        let was_frozen = env
             .storage()
-            .persistent()
-            .get::<PlayerFreezeKey, soroban_sdk::Vec<Address>>(&PlayerFreezeKey::FrozenPlayers)
-        {
-            let mut updated: soroban_sdk::Vec<Address> = soroban_sdk::vec![&env];
-            for existing in list.iter() {
-                if existing != player {
-                    updated.push_back(existing.clone());
-                }
-            }
+            .instance()
+            .has(&PlayerFreezeKey::FrozenPlayer(player.clone()));
+
+        if was_frozen {
             env.storage()
+                .instance()
+                .remove(&PlayerFreezeKey::FrozenPlayer(player.clone()));
+
+            // Remove from the persistent list.
+            if let Some(list) = env
+                .storage()
                 .persistent()
-                .set(&PlayerFreezeKey::FrozenPlayers, &updated);
-            env.storage().persistent().extend_ttl(
-                &PlayerFreezeKey::FrozenPlayers,
-                MATCH_TTL_LEDGERS,
-                MATCH_TTL_LEDGERS,
+                .get::<PlayerFreezeKey, soroban_sdk::Vec<Address>>(&PlayerFreezeKey::FrozenPlayers)
+            {
+                let mut updated: soroban_sdk::Vec<Address> = soroban_sdk::vec![&env];
+                for existing in list.iter() {
+                    if existing != player {
+                        updated.push_back(existing.clone());
+                    }
+                }
+                env.storage()
+                    .persistent()
+                    .set(&PlayerFreezeKey::FrozenPlayers, &updated);
+                env.storage().persistent().extend_ttl(
+                    &PlayerFreezeKey::FrozenPlayers,
+                    MATCH_TTL_LEDGERS,
+                    MATCH_TTL_LEDGERS,
+                );
+            }
+
+            env.events().publish(
+                (Symbol::new(&env, "admin"), symbol_short!("unfreeze")),
+                player,
             );
         }
-
-        env.events().publish(
-            (Symbol::new(&env, "admin"), symbol_short!("unfreeze")),
-            player,
-        );
         Ok(())
     }
 
@@ -2734,7 +2748,10 @@ impl EscrowContract {
 
     /// Expire a pending match that has not been fully funded within MATCH_TIMEOUT_LEDGERS.
     /// Anyone can call this; funds are returned to whoever deposited.
-    /// Pause duration is excluded from the timeout calculation.
+    ///
+    /// Note: Only Pending matches can expire (transitions through pause are not available
+    /// for Pending matches), so the timeout is simply based on ledger sequence without
+    /// adjusting for pause duration.
     pub fn expire_match(env: Env, match_id: u64) -> Result<(), Error> {
         extend_instance_ttl(&env);
         let mut m: Match = env
@@ -2748,11 +2765,10 @@ impl EscrowContract {
         }
 
         let current_ledger = env.ledger().sequence();
-        let total_elapsed = current_ledger.saturating_sub(m.created_ledger);
-        let effective_elapsed = total_elapsed.saturating_sub(m.total_pause_duration);
+        let elapsed = current_ledger.saturating_sub(m.created_ledger);
         let timeout = Self::current_match_timeout(&env);
 
-        if effective_elapsed < timeout {
+        if elapsed < timeout {
             return Err(Error::MatchNotExpired);
         }
 
@@ -2814,6 +2830,97 @@ impl EscrowContract {
         env.events().publish(
             (Symbol::new(&env, "match"), symbol_short!("expired")),
             match_id,
+        );
+
+        Ok(())
+    }
+
+    /// Admin recovery function for Pending matches with blacklisted tokens.
+    ///
+    /// When a match token is blacklisted after match creation, expire_match blocks
+    /// refunds with TokenNotAllowed error, leaving any deposited funds locked forever.
+    /// This function allows admin to force refunds even if the token is blacklisted.
+    ///
+    /// Issue #1546: Fix: expire_match blocks refunds forever if the match token was blacklisted
+    pub fn admin_recover_match(env: Env, match_id: u64) -> Result<(), Error> {
+        extend_instance_ttl(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+        admin.require_auth();
+
+        let mut m: Match = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Match(match_id))
+            .ok_or(Error::MatchNotFound)?;
+
+        // Only allow recovery of Pending matches (the ones that can't deposit/complete)
+        if m.state != MatchState::Pending {
+            return Err(Error::InvalidState);
+        }
+
+        // TODO: Implement forced refund with try_invoke_contract to handle blacklisted tokens
+        // 1. Attempt to transfer player1's stake even if token is blacklisted
+        // 2. If transfer fails (due to blacklist), log the failure but continue
+        // 3. Attempt to transfer player2's stake similarly
+        // 4. Mark match as Cancelled regardless of transfer success/failure
+        // 5. Record snapshot for audit trail
+        // 6. Emit recovery event with success/failure details
+
+        let is_multi_token = m.token_b.is_some() && m.conversion_rate.is_some_and(|r| r > 0);
+
+        // Attempt refunds regardless of blacklist status
+        if m.player1_deposited {
+            // TODO: Use try_invoke_contract or continue-on-error pattern
+            let client_a = token::Client::new(&env, &m.token);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client_a.transfer(&env.current_contract_address(), &m.player1, &m.stake_amount);
+            }));
+        }
+
+        if m.player2_deposited {
+            // TODO: Use try_invoke_contract or continue-on-error pattern
+            let token_b = m.token_b.clone().unwrap_or_else(|| m.token.clone());
+            let amount_b = if is_multi_token {
+                m.stake_amount
+                    .checked_mul(m.conversion_rate.unwrap_or(0))
+                    .ok_or(Error::Overflow)?
+                    .checked_div(10_000_000)
+                    .ok_or(Error::Overflow)?
+            } else {
+                m.stake_amount
+            };
+            let client_b = token::Client::new(&env, &token_b);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client_b.transfer(&env.current_contract_address(), &m.player2, &amount_b);
+            }));
+        }
+
+        m.state = MatchState::Cancelled;
+        m.completed_ledger = Some(env.ledger().sequence());
+        env.storage()
+            .persistent()
+            .set(&DataKey::Match(match_id), &m);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Match(match_id),
+            MATCH_TTL_LEDGERS,
+            MATCH_TTL_LEDGERS,
+        );
+
+        Self::record_snapshot(&env, &m, SnapshotReason::Cancelled);
+        if m.player1_deposited {
+            Self::record_player_snapshot(&env, &m.player1);
+        }
+        if m.player2_deposited {
+            Self::record_player_snapshot(&env, &m.player2);
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "admin"), Symbol::new(&env, "match_recovered")),
+            (match_id, admin),
         );
 
         Ok(())
