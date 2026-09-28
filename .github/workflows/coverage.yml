@@ -20,9 +20,9 @@ jobs:
   coverage:
     name: Code Coverage Report
     if: github.base_ref == 'main' || github.base_ref == 'master' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -33,7 +33,7 @@ jobs:
         run: cargo install cargo-tarpaulin
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -47,14 +47,14 @@ jobs:
         run: |
           cd contracts/escrow
           set +e
-          # Temporarily using 85% threshold while project-wide coverage is improved.
-          # Goal: 90%. Current: 87.42%. Pre-existing gap not caused by new PRs.
+          # Threshold aligned with COVERAGE_NOTE.md: 87% minimum, 90% goal.
+          # Current coverage: 87.42%. Pre-existing gap not caused by new PRs.
           # TODO: Restore --fail-under 90 once overall coverage reaches goal.
           cargo tarpaulin \
             --lib \
             --out Html \
             --out Stdout \
-            --output-dir coverage \
+            --output-dir ../../coverage \
             --timeout 300 \
             --exclude-files tests/* \
             --exclude-files helpers.rs \
@@ -82,11 +82,10 @@ jobs:
 
       - name: Upload coverage as artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: coverage-report
-          # cargo-tarpaulin resolves --output-dir relative to the workspace
-          # root (repo root), not the `cd contracts/escrow` cwd above.
+          # --output-dir ../../coverage resolves to repo root coverage/ directory
           path: coverage/
           retention-days: 30
 

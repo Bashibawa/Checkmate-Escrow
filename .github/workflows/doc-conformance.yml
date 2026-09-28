@@ -9,10 +9,10 @@ on:
 jobs:
   conformance-check:
     name: Check Doc-Code Conformance
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Run conformance checker
@@ -20,10 +20,10 @@ jobs:
 
   conformance-self-test:
     name: Conformance Checker Self-Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Run positive/negative control tests
@@ -32,9 +32,9 @@ jobs:
   require-doc-update:
     name: Require Doc Update on Contract Change
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Verify contract-surface changes include a doc update
