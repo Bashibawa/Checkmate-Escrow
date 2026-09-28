@@ -356,8 +356,8 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 ## Handsoff notes
 
-<!-- handsoff-issue-1532 -->
-- #1532: Security: match participants can vote on their own dispute
+<!-- handsoff-issue-1528 -->
+- #1528: Security: `deposit_batch` and `submit_result_batch` keep partial state writes when an entry fails
 
-<!-- handsoff-issue-1534 -->
-- #1534: Fix: disputes record the base oracle instead of the effective (temporary) oracle
+<!-- handsoff-issue-1530 -->
+- #1530: Fix: `settle_result` updates stats and payout counters before the dispute period ends

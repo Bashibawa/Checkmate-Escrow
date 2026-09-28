@@ -76,8 +76,7 @@ pub enum Error {
     NotAnOracle = 54,
     /// A deposit for this match is already in progress (reentrancy guard).
     DepositInProgress = 55,
-    /// `mark_dispute_for_oracle_slash` has already been called for this dispute.
-    /// The `DisputeSlashSignalled(dispute_id)` flag is persisted on the first call so
-    /// the `oracle_slash_signal` event cannot be emitted repeatedly for one dispute.
-    DisputeSlashAlreadySignalled = 56,
+    /// The dispute's voting deadline plus grace period has not yet elapsed, so the
+    /// no-quorum fallback resolution cannot be applied yet.
+    DisputeFallbackNotElapsed = 56,
 }
