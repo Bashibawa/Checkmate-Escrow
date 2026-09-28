@@ -3763,6 +3763,12 @@ impl EscrowContract {
             .ok_or(Error::Unauthorized)?;
         admin.require_auth();
 
+        // Reject the contract address as the new admin to prevent loss of control.
+        let contract_address = env.current_contract_address();
+        if new_admin == contract_address {
+            return Err(Error::InvalidAddress);
+        }
+
         env.storage().instance().set(
             &DataKey::PendingAdmin,
             &PendingAdminProposal {
@@ -3805,6 +3811,38 @@ impl EscrowContract {
         env.events().publish(
             (Symbol::new(&env, "admin"), symbol_short!("xfer")),
             proposal.pending_admin,
+        );
+        Ok(())
+    }
+
+    /// Cancel a pending admin proposal. Admin only.
+    ///
+    /// Allows the current admin to cancel a pending proposal without transferring
+    /// to the proposed new admin. This is useful if a proposal was made in error
+    /// or needs to be superseded by a different proposal.
+    ///
+    /// Issue #1554: Enhancement to allow cancelling a pending admin proposal.
+    pub fn cancel_admin_proposal(env: Env) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+        admin.require_auth();
+
+        // Verify that a proposal exists
+        let _proposal: PendingAdminProposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(Error::Unauthorized)?;
+
+        // Remove the pending proposal
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin"), Symbol::new(&env, "prop_cxl")),
+            admin,
         );
         Ok(())
     }
@@ -5610,6 +5648,11 @@ impl EscrowContract {
 
     /// Temporarily rotate the oracle address for `duration_seconds`. Admin only.
     /// Returns to `old_oracle` automatically once `duration_seconds` elapses.
+    ///
+    /// Duration must be between 1 hour (3600 seconds) and 30 days (2592000 seconds)
+    /// to prevent accidentally creating a permanent rotation or an already-expired one.
+    ///
+    /// Issue #1555: Validate duration bounds to prevent invalid temporary rotations.
     pub fn rotate_oracle_temporary(
         env: Env,
         old_oracle: Address,
@@ -5623,6 +5666,14 @@ impl EscrowContract {
             .get(&DataKey::Admin)
             .ok_or(Error::Unauthorized)?;
         admin.require_auth();
+
+        // Validate duration is within acceptable bounds
+        const MIN_DURATION_SECONDS: u64 = 3600;        // 1 hour
+        const MAX_DURATION_SECONDS: u64 = 2_592_000;   // 30 days
+
+        if duration_seconds < MIN_DURATION_SECONDS || duration_seconds > MAX_DURATION_SECONDS {
+            return Err(Error::InvalidAmount);
+        }
 
         if new_oracle == env.current_contract_address() {
             return Err(Error::InvalidAddress);
@@ -5739,9 +5790,23 @@ impl EscrowContract {
     }
 
     /// Direct admin transfer (single-step). Current admin only.
+    /// Deprecated: Use propose_admin + accept_admin for a safer two-step handover.
+    ///
+    /// This single-step transfer is kept for backwards compatibility but bypasses
+    /// the new admin's signature requirement. Callers should prefer propose_admin
+    /// to require the new admin to explicitly accept the transfer.
+    ///
+    /// Issue #1553: Security risk from single-step transfer without new admin signature.
     pub fn transfer_admin(env: Env, new_admin: Address, caller: Address) -> Result<(), Error> {
         extend_instance_ttl(&env);
         caller.require_auth();
+
+        // Reject the contract address as admin to prevent loss of control from typos.
+        let contract_address = env.current_contract_address();
+        if new_admin == contract_address {
+            return Err(Error::InvalidAddress);
+        }
+
         let admin: Address = env
             .storage()
             .instance()
@@ -5750,12 +5815,12 @@ impl EscrowContract {
         if caller != admin {
             return Err(Error::Unauthorized);
         }
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.events().publish(
-            (Symbol::new(&env, "admin"), symbol_short!("xfer")),
-            (admin, new_admin),
-        );
+
+        // Delegate to propose_admin to enforce the two-step handover
+        Self::propose_admin(env, new_admin)?;
+
+        // Note: The new admin must now call accept_admin to finalize the transfer.
+        // This ensures they have seen and explicitly accepted the responsibility.
         Ok(())
     }
 
@@ -6604,14 +6669,10 @@ impl EscrowContract {
     pub fn resolve_oracle_deadlock(env: Env, match_id: u64, winner: Winner) -> Result<(), Error> {
         extend_instance_ttl(&env);
 
-        if env
-            .storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
-        {
-            return Err(Error::ContractPaused);
-        }
+        // Note: Unlike other state-changing operations, this recovery function deliberately
+        // ignores the contract-wide Paused flag, mirroring cancel_match and expire_match.
+        // During an incident, deadlocked funds must be recoverable even when the contract
+        // is paused, so the pause flag does not block this admin intervention path.
 
         // Require admin authorization.
         let admin: Address = env
