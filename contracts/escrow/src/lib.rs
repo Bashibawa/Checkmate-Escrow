@@ -47,7 +47,7 @@ use types::{
     BalanceAtTimestamp, BalanceSnapshot, DataKey, Dispute, DisputeBondTier, DisputeState, FeeTier,
     Match, MatchState, OracleRotationState, PendingAdminProposal, PendingOracleRotation, Platform,
     PlatformStats, PlayerBalanceSnapshot, PlayerFreezeKey, PlayerRating, PlayerRatingKey,
-    PlayerTier, ProtocolConfig, SnapshotReason, TempOracleRotation, Winner,
+    PlayerStats, PlayerTier, ProtocolConfig, SnapshotReason, TempOracleRotation, Winner,
 };
 
 /// ~30 days at 5s/ledger. Used as the default TTL and expiration threshold.
@@ -1512,7 +1512,7 @@ impl EscrowContract {
         Self::record_platform_match_created(&env, stake_amount);
 
         env.events().publish(
-            (Symbol::new(&env, "match"), symbol_short!("bracket_created")),
+            (Symbol::new(&env, "match"), Symbol::new(&env, "bracket_created")),
             (id, bracket_id, round, m.player1, m.player2, stake_amount),
         );
 
@@ -2348,7 +2348,7 @@ impl EscrowContract {
         oracle: Address,
     ) -> Result<(), Error> {
         // Validate and execute payout via standard submit_result (handles oracle auth).
-        Self::submit_result(env.clone(), match_id, winner, oracle)?;
+        Self::submit_result(env.clone(), match_id, winner, oracle, None)?;
 
         // Store oracle record in a canonical location for audit trail.
         env.storage()
@@ -2416,7 +2416,7 @@ impl EscrowContract {
             let outcome = if already_settled {
                 Err(Error::OracleAlreadyConfirmed)
             } else {
-                Self::settle_result(&env, match_id, winner)
+                Self::settle_result(&env, match_id, winner, None)
             };
             outcomes.push_back(outcome.err());
         }
@@ -3587,27 +3587,6 @@ impl EscrowContract {
             (Symbol::new(&env, "admin"), symbol_short!("max_stake")),
             amount,
         );
-        Ok(())
-    }
-
-    /// Set the minimum stake for new matches — admin only.
-    pub fn set_minimum_stake(env: Env, amount: i128) -> Result<(), Error> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::Unauthorized)?;
-        admin.require_auth();
-
-        if amount <= 0 {
-            return Err(Error::InvalidAmount);
-        }
-
-        let mut config = Self::get_config(&env);
-        config.minimum_stake = amount;
-        env.storage()
-            .instance()
-            .set(&DataKey::ProtocolConfig, &config);
         Ok(())
     }
 
@@ -6431,7 +6410,7 @@ impl EscrowContract {
 
         if new_confirmations >= required {
             // Threshold reached — execute payout via shared settlement logic.
-            Self::settle_result(&env, match_id, winner)?;
+            Self::settle_result(&env, match_id, winner, None)?;
         } else {
             // Threshold not reached; check if still mathematically possible.
             Self::check_oracle_deadlock(&env, match_id, new_confirmations, required)?;
@@ -6500,7 +6479,7 @@ impl EscrowContract {
         }
 
         // Execute payout with the admin-chosen winner.
-        Self::settle_result(&env, match_id, winner.clone())?;
+        Self::settle_result(&env, match_id, winner.clone(), None)?;
 
         // Emit event for admin resolution.
         env.events().publish(
