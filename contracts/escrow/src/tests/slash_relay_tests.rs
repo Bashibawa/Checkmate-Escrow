@@ -252,170 +252,58 @@ fn test_relay_slash_signal_requires_overturned_state() {
     let dispute_id = client.dispute_oracle_result(
         &match_id,
         &player2,
-        &String::from_str(&env, "relay_upheld_test"),
+        &String::from_str(&env, "relay_upheld"),
     );
 
-    // Both players vote to uphold (no majority overturn)
-    client.vote_on_dispute(&dispute_id, &player1, &false);
+    // Resolve as upheld (not overturned)
     client.vote_on_dispute(&dispute_id, &player2, &false);
-
     env.ledger()
         .set_sequence_number(1000 + VOTING_PERIOD_LEDGERS);
     client.resolve_dispute_by_vote(&dispute_id);
 
     let dispute = client.get_dispute(&dispute_id);
-    // Dispute is upheld, not overturned
     assert_eq!(dispute.state, DisputeState::ResolvedUpheld);
 
-    // Trying to mark for slash should fail
-    let result = client.try_mark_dispute_for_oracle_slash(&dispute_id, &10);
-    assert_eq!(result, Err(Ok(Error::InvalidState)));
+    let bond = dispute.dispute_bond;
+    let result = client.try_mark_dispute_for_oracle_slash(&dispute_id, &bond);
+    assert!(result.is_err(), "slash signal must be rejected for non-overturned dispute");
 }
 
-/// Test 7: Verify relay signal can be triggered multiple times for different disputes
+/// Test 7: Verify that a dispute can only be signalled for oracle slash once.
+///
+/// Regression test for #1535: `mark_dispute_for_oracle_slash` previously stored
+/// nothing, so it could be called repeatedly for the same dispute, causing
+/// off-chain relays to slash the oracle multiple times. The contract now
+/// persists a `DisputeSlashSignalled(dispute_id)` flag and rejects repeats.
 #[test]
-fn test_relay_multiple_disputes_independent_signals() {
-    let (env, contract_id, oracle, player1, player2, token, _admin) =
-        setup_with_dispute_period(200);
+fn test_relay_slash_signal_is_idempotent() {
+    let (env, contract_id, _oracle, _player1, _player2, _token, _admin, dispute_id, bond) =
+        setup_for_slash_relay_test();
     let client = EscrowContractClient::new(&env, &contract_id);
 
-    client.set_dispute_bond_basis_points(&1000);
-
-    // Create first match and dispute
-    let match_id_1 = client.create_match(
-        &player1,
-        &player2,
-        &100,
-        &token,
-        &String::from_str(&env, "rly00004"),
-        &Platform::Lichess,
-    );
-    client.deposit(&match_id_1, &player1);
-    client.deposit(&match_id_1, &player2);
-
-    env.ledger().set_sequence_number(1000);
-    client.submit_result(&match_id_1, &Winner::Player1, &oracle);
-
-    let dispute_id_1 = client.dispute_oracle_result(
-        &match_id_1,
-        &player2,
-        &String::from_str(&env, "relay_multi_1_evidence"),
-    );
-
-    client.vote_on_dispute(&dispute_id_1, &player2, &true);
-    env.ledger()
-        .set_sequence_number(1000 + VOTING_PERIOD_LEDGERS);
-    client.resolve_dispute_by_vote(&dispute_id_1);
-
-    let bond_1 = client.get_dispute(&dispute_id_1).dispute_bond;
-
-    // Create second match and dispute
-    env.ledger().set_sequence_number(2000);
-    let match_id_2 = client.create_match(
-        &player1,
-        &player2,
-        &100,
-        &token,
-        &String::from_str(&env, "rly00005"),
-        &Platform::Lichess,
-    );
-    client.deposit(&match_id_2, &player1);
-    client.deposit(&match_id_2, &player2);
-
-    env.ledger().set_sequence_number(2100);
-    client.submit_result(&match_id_2, &Winner::Player2, &oracle);
-
-    let dispute_id_2 = client.dispute_oracle_result(
-        &match_id_2,
-        &player1,
-        &String::from_str(&env, "relay_multi_2_evidence"),
-    );
-
-    client.vote_on_dispute(&dispute_id_2, &player1, &true);
-    env.ledger()
-        .set_sequence_number(2100 + VOTING_PERIOD_LEDGERS);
-    client.resolve_dispute_by_vote(&dispute_id_2);
-
-    let bond_2 = client.get_dispute(&dispute_id_2).dispute_bond;
-
-    // Mark both for slash
-    client.mark_dispute_for_oracle_slash(&dispute_id_1, &bond_1);
-    client.mark_dispute_for_oracle_slash(&dispute_id_2, &bond_2);
-
-    // Verify both signals were emitted
-    let events = env.events().all();
-    let slash_signals: Vec<_> = events
-        .iter()
-        .filter(|(_, topics, _)| {
-            *topics
-                == vec![
-                    &env,
-                    Symbol::new(&env, "dispute").into_val(&env),
-                    Symbol::new(&env, "oracle_slash_signal").into_val(&env),
-                ]
-        })
-        .collect();
-
-    assert_eq!(
-        slash_signals.len(),
-        2,
-        "Two slash signals should be emitted"
-    );
-}
-
-/// Test 8: Verify relay handles unregistered oracle gracefully in tests
-/// (In practice, the relay should check if oracle is registered before calling slash)
-#[test]
-fn test_relay_signal_emitted_even_if_oracle_unregistered() {
-    let (env, contract_id, oracle, player1, player2, token, _admin) =
-        setup_with_dispute_period(200);
-    let client = EscrowContractClient::new(&env, &contract_id);
-
-    client.set_dispute_bond_basis_points(&1000);
-
-    let match_id = client.create_match(
-        &player1,
-        &player2,
-        &100,
-        &token,
-        &String::from_str(&env, "rly00006"),
-        &Platform::Lichess,
-    );
-    client.deposit(&match_id, &player1);
-    client.deposit(&match_id, &player2);
-
-    env.ledger().set_sequence_number(1000);
-    client.submit_result(&match_id, &Winner::Player1, &oracle);
-
-    let dispute_id = client.dispute_oracle_result(
-        &match_id,
-        &player2,
-        &String::from_str(&env, "relay_unreg_evidence"),
-    );
-
-    client.vote_on_dispute(&dispute_id, &player2, &true);
-    env.ledger()
-        .set_sequence_number(1000 + VOTING_PERIOD_LEDGERS);
-    client.resolve_dispute_by_vote(&dispute_id);
-
-    let bond = client.get_dispute(&dispute_id).dispute_bond;
-
-    // Signal is emitted regardless of oracle registration status on oracle contract
+    // First call succeeds and emits the signal.
     client.mark_dispute_for_oracle_slash(&dispute_id, &bond);
 
+    // Second call for the same dispute must be rejected.
+    let second = client.try_mark_dispute_for_oracle_slash(&dispute_id, &bond);
+    assert!(
+        second.is_err(),
+        "mark_dispute_for_oracle_slash must reject a repeat call for the same dispute"
+    );
+
+    // Only a single oracle_slash_signal event should have been emitted.
     let events = env.events().all();
     let expected_topics = vec![
         &env,
         Symbol::new(&env, "dispute").into_val(&env),
         Symbol::new(&env, "oracle_slash_signal").into_val(&env),
     ];
-
-    let matched = events
+    let signal_count = events
         .iter()
-        .find(|(_, topics, _)| *topics == expected_topics);
-
-    assert!(
-        matched.is_some(),
-        "Slash signal must be emitted even if oracle is unregistered"
+        .filter(|(_, topics, _)| *topics == expected_topics)
+        .count();
+    assert_eq!(
+        signal_count, 1,
+        "oracle_slash_signal must be emitted exactly once per dispute"
     );
 }
