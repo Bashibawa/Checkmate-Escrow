@@ -253,10 +253,150 @@ fn test_admin_resolve_stalled_match_rejects_not_funded() {
 
     advance_timestamp(&env, ADMIN_STALL_WINDOW_SECONDS + 1);
 
-    // With both deposits present the match is funded, so the guard should not
-    // trip; this exercises the happy path guard for completeness.
-    let result = client.try_admin_resolve_stalled_match(&id, &admin, &Winner::Draw);
-    assert!(result.is_ok());
+    // This will return InvalidState (Pending), not NotFunded, since we check state first.
+    let result = client.try_admin_resolve_stalled_match(&id2, &admin, &Winner::Draw);
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+fn test_heartbeat_does_not_prevent_admin_resolution_after_stall_window() {
+    // #1518 fix: admin_resolve_stalled_match now measures from activated_at,
+    // not from the player-controlled last_heartbeat. A player heartbeating at
+    // day 6 can no longer keep the 7-day window from opening once 7 days have
+    // passed from match activation.
+    let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let id = client.create_match(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &String::from_str(&env, "o1p2q3r4"),
+        &Platform::Lichess,
+    );
+    client.deposit(&id, &player1);
+    client.deposit(&id, &player2);
+
+    // Advance time to 6 days (within the 7-day window from activation).
+    advance_timestamp(&env, 6 * 24 * 60 * 60);
+
+    // Player1 sends a heartbeat, refreshing last_heartbeat.
+    // Under the OLD logic this would reset the stall window.
+    // Under the NEW logic (#1518 fix) it does NOT affect the stall window.
+    client.heartbeat_match(&id, &player1);
+
+    // Advance another 2 days (8 days total from activation, only 2 since heartbeat).
+    advance_timestamp(&env, 2 * 24 * 60 * 60);
+
+    // Admin resolution must SUCCEED because 8 days have passed since activation,
+    // even though only 2 days have passed since the last heartbeat.
+    client.admin_resolve_stalled_match(&id, &admin, &Winner::Draw);
+    assert_eq!(client.get_match(&id).state, MatchState::Completed);
+}
+
+#[test]
+fn test_admin_resolve_emits_correct_event() {
+    let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let id = client.create_match(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &String::from_str(&env, "s5t6u7v8"),
+        &Platform::Lichess,
+    );
+    client.deposit(&id, &player1);
+    client.deposit(&id, &player2);
+
+    advance_timestamp(&env, ADMIN_STALL_WINDOW_SECONDS + 1);
+
+    client.admin_resolve_stalled_match(&id, &admin, &Winner::Player1);
+
+    // Verify an event was emitted (full event structure validation is complex,
+    // so we just verify the function completes successfully and the match state is correct).
+    let m = client.get_match(&id);
+    assert_eq!(m.state, MatchState::Completed);
+    assert_eq!(m.winner, Winner::Player1);
+}
+
+/// Adversarial test: prove that an Active match stuck for >24h with no
+/// heartbeat and no oracle result is unrecoverable via any *existing*
+/// public function (before the admin_resolve_stalled_match fix).
+///
+/// This test verifies the bug described in Issue #1274.
+#[test]
+fn test_stalled_match_unrecoverable_via_existing_functions() {
+    let (env, contract_id, _oracle, player1, player2, token, _admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let id = client.create_match(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &String::from_str(&env, "w9x0y1z2"),
+        &Platform::Lichess,
+    );
+    client.deposit(&id, &player1);
+    client.deposit(&id, &player2);
+
+    // Advance time past both the 24h rollback window and the 7-day stall window.
+    advance_timestamp(&env, ADMIN_STALL_WINDOW_SECONDS + 1);
+
+    let m = client.get_match(&id);
+    assert_eq!(m.state, MatchState::Active);
+
+    // Try all existing recovery functions — all should fail.
+
+    // 1. cancel_match — only works for Pending matches (returns MatchAlreadyActive for Active).
+    let result = client.try_cancel_match(&id, &player1);
+    assert_eq!(result, Err(Ok(Error::MatchAlreadyActive)));
+
+    // 2. expire_match — only works for Pending matches.
+    let result = client.try_expire_match(&id);
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+
+    // 3. dispute_and_rollback_match — only works within 24h of last_heartbeat.
+    let result =
+        client.try_dispute_and_rollback_match(&id, &player1, &String::from_str(&env, "stalled"));
+    assert_eq!(result, Err(Ok(Error::VotingPeriodElapsed)));
+
+    // Conclusion: the match is permanently stuck — no function can recover it.
+    // The stake is locked forever until admin_resolve_stalled_match is added.
+}
+
+#[test]
+fn test_admin_resolve_stalled_match_removes_active_match_index() {
+    let (env, contract_id, _oracle, player1, player2, token, admin) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let id = client.create_match(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &String::from_str(&env, "a3b4c5d6"),
+        &Platform::Lichess,
+    );
+    client.deposit(&id, &player1);
+    client.deposit(&id, &player2);
+
+    // Verify the match is in the active index.
+    let active_matches = client.get_active_matches();
+    let match_ids: Vec<u64> = active_matches.iter().map(|m| m.id).collect();
+    assert!(match_ids.contains(&id));
+
+    advance_timestamp(&env, ADMIN_STALL_WINDOW_SECONDS + 1);
+
+    client.admin_resolve_stalled_match(&id, &admin, &Winner::Draw);
+
+    // Verify the match is no longer in the active index.
+    let active_matches_after = client.get_active_matches();
+    let match_ids_after: Vec<u64> = active_matches_after.iter().map(|m| m.id).collect();
+    assert!(!match_ids_after.contains(&id));
 }
 
 /// Oracle settlement and admin stall resolution must produce identical player

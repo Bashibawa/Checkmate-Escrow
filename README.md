@@ -356,8 +356,8 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 ## Handsoff notes
 
-<!-- handsoff-issue-1536 -->
-- #1536: Fix: `admin_resolve_stalled_match` emits `match/cancelled` for a Completed match
+<!-- handsoff-issue-1528 -->
+- #1528: Security: `deposit_batch` and `submit_result_batch` keep partial state writes when an entry fails
 
-<!-- handsoff-issue-1539 -->
-- #1539: Fix: admins can set `minimum_stake` above `maximum_stake`
+<!-- handsoff-issue-1530 -->
+- #1530: Fix: `settle_result` updates stats and payout counters before the dispute period ends
