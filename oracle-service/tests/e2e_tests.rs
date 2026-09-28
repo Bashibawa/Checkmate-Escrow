@@ -209,6 +209,7 @@ async fn e2e_soroban_client_constructs_from_testnet_config() {
         oracle_cfg.rpc_url.clone(),
         oracle_cfg.network_passphrase.clone(),
         &oracle_cfg.contract_escrow,
+        oracle_cfg.max_fee_stroops,
     );
     assert!(
         result.is_ok(),
