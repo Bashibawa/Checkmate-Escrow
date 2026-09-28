@@ -172,7 +172,7 @@ describe('WebSocket server ↔ event-indexer integration', () => {
     indexer.setEvents([makeEvent({ match_id: 7, ledger_sequence: 2000 })]);
 
     // Start polling — event should arrive
-    poller.start();
+    await poller.start();
 
     const eventMsg = (await waitForMessage(ws, 'event', 3_000)) as { event: IndexedEvent };
     expect(eventMsg.event.match_id).toBe(7);
@@ -187,7 +187,7 @@ describe('WebSocket server ↔ event-indexer integration', () => {
     await waitForMessage(ws, 'subscribed');
 
     indexer.setEvents([makeEvent({ match_id: 7, ledger_sequence: 2001 })]);
-    poller.start();
+    await poller.start();
 
     // Wait 500 ms — should not receive an event
     const received = await new Promise<boolean>((resolve) => {
@@ -215,7 +215,7 @@ describe('WebSocket server ↔ event-indexer integration', () => {
     await waitForMessage(ws, 'subscribed');
 
     indexer.setEvents([makeEvent({ match_id: 5, player1: 'GABC', ledger_sequence: 3000 })]);
-    poller.start();
+    await poller.start();
 
     const eventMsg = (await waitForMessage(ws, 'event', 3_000)) as { event: IndexedEvent };
     expect(eventMsg.event.player1).toBe('GABC');
@@ -230,7 +230,7 @@ describe('WebSocket server ↔ event-indexer integration', () => {
 
     const event = makeEvent({ match_id: 7, ledger_sequence: 4000 });
     indexer.setEvents([event]);
-    poller.start();
+    await poller.start();
 
     let eventCount = 0;
     ws.on('message', (raw) => {
@@ -293,7 +293,7 @@ describe('WebSocket server ↔ event-indexer integration', () => {
     await waitForMessage(ws, 'unsubscribed');
 
     indexer.setEvents([makeEvent({ match_id: 7, ledger_sequence: 5000 })]);
-    poller.start();
+    await poller.start();
 
     const received = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => resolve(false), 500);

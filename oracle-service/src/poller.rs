@@ -86,32 +86,15 @@ impl Poller {
             cfg.rpc_url.clone(),
             cfg.network_passphrase.clone(),
             &cfg.contract_escrow,
+            cfg.max_fee_stroops,
         )?;
 
         let chess_com =
             ChessComClient::new().map_err(|e| OracleServiceError::Config(e.to_string()))?;
         let lichess =
             LichessClient::new().map_err(|e| OracleServiceError::Config(e.to_string()))?;
-        let pubkey = pubkey_from_signing_key(&cfg.oracle_signing_key);
 
-        Ok(Self {
-            inner: Arc::new(PollerInner {
-                queue: PendingQueue::new(&cfg.queue_dir),
-                dead_letter: DeadLetterStore::new(&cfg.queue_dir, cfg.dead_letter_max_entries),
-                cursor: ReconciliationCursor::new(&cfg.queue_dir),
-                soroban,
-                chess_com,
-                lichess,
-                signing_key: Zeroizing::new(*cfg.oracle_signing_key),
-                max_retries: cfg.max_retries,
-                retry_base_delay_secs: cfg.retry_base_delay_secs,
-                chessdotcom_poll_interval_secs: cfg.chessdotcom_poll_interval_secs,
-                contract_oracle: cfg.contract_oracle.clone(),
-                pubkey,
-                result_cache: ResultCache::with_defaults(),
-                submission_log: SubmissionLog::new(&cfg.queue_dir),
-            }),
-        })
+        Self::from_parts(cfg, soroban, chess_com, lichess)
     }
 
     /// Construct a poller with a custom Lichess API base URL.
@@ -125,6 +108,7 @@ impl Poller {
             cfg.rpc_url.clone(),
             cfg.network_passphrase.clone(),
             &cfg.contract_escrow,
+            cfg.max_fee_stroops,
         )?;
 
         let chess_com =
@@ -134,26 +118,8 @@ impl Poller {
             std::time::Duration::from_secs(30),
         )
         .map_err(|e| OracleServiceError::Config(e.to_string()))?;
-        let pubkey = pubkey_from_signing_key(&cfg.oracle_signing_key);
 
-        Ok(Self {
-            inner: Arc::new(PollerInner {
-                queue: PendingQueue::new(&cfg.queue_dir),
-                dead_letter: DeadLetterStore::new(&cfg.queue_dir, cfg.dead_letter_max_entries),
-                cursor: ReconciliationCursor::new(&cfg.queue_dir),
-                soroban,
-                chess_com,
-                lichess,
-                signing_key: Zeroizing::new(*cfg.oracle_signing_key),
-                max_retries: cfg.max_retries,
-                retry_base_delay_secs: cfg.retry_base_delay_secs,
-                chessdotcom_poll_interval_secs: cfg.chessdotcom_poll_interval_secs,
-                contract_oracle: cfg.contract_oracle.clone(),
-                pubkey,
-                result_cache: ResultCache::with_defaults(),
-                submission_log: SubmissionLog::new(&cfg.queue_dir),
-            }),
-        })
+        Self::from_parts(cfg, soroban, chess_com, lichess)
     }
 
     /// Construct a poller with a custom Chess.com API base URL.
@@ -167,6 +133,7 @@ impl Poller {
             cfg.rpc_url.clone(),
             cfg.network_passphrase.clone(),
             &cfg.contract_escrow,
+            cfg.max_fee_stroops,
         )?;
 
         let chess_com = ChessComClient::new_with_base_and_timeout(
@@ -176,6 +143,18 @@ impl Poller {
         .map_err(|e| OracleServiceError::Config(e.to_string()))?;
         let lichess =
             LichessClient::new().map_err(|e| OracleServiceError::Config(e.to_string()))?;
+
+        Self::from_parts(cfg, soroban, chess_com, lichess)
+    }
+
+    /// Construct a poller from the given clients and configuration.
+    /// Private helper shared by all three public constructors.
+    fn from_parts(
+        cfg: &OracleConfig,
+        soroban: SorobanClient,
+        chess_com: ChessComClient,
+        lichess: LichessClient,
+    ) -> Result<Self, OracleServiceError> {
         let pubkey = pubkey_from_signing_key(&cfg.oracle_signing_key);
 
         Ok(Self {

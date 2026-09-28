@@ -54,6 +54,7 @@ pub struct SorobanClient {
     network_passphrase: String,
     contract_escrow: [u8; 32],
     _oracle_address: AccountId,
+    max_fee_stroops: u32,
 }
 
 impl SorobanClient {
@@ -62,10 +63,12 @@ impl SorobanClient {
     /// * `rpc_url` — e.g. `https://soroban-testnet.stellar.org`
     /// * `network_passphrase` — e.g. `"Test SDF Network ; September 2015"`
     /// * `contract_escrow` — strkey C-address of the escrow contract
+    /// * `max_fee_stroops` — maximum transaction fee in stroops
     pub fn new(
         rpc_url: String,
         network_passphrase: String,
         contract_escrow_strkey: &str,
+        max_fee_stroops: u32,
     ) -> Result<Self, OracleServiceError> {
         // Fail fast if we're in production and someone has misconfigured
         // `STELLAR_RPC_URL` to a plain HTTP endpoint — submitting oracle
@@ -97,6 +100,7 @@ impl SorobanClient {
             network_passphrase,
             contract_escrow,
             _oracle_address: oracle_address,
+            max_fee_stroops,
         })
     }
 
@@ -130,7 +134,19 @@ impl SorobanClient {
 
         // ── 5. Re-build with correct fees and soroban data ────────────────
         let min_fee: i64 = sim.min_resource_fee.parse().unwrap_or(0);
-        let total_fee = (100_000i64 + min_fee) as u32; // base + resource fee
+        let total_fee_i64 = 100_000i64 + min_fee;
+        let total_fee = u32::try_from(total_fee_i64).map_err(|_| {
+            OracleServiceError::RpcError(format!(
+                "oracle fee {} stroops exceeds u32::MAX",
+                total_fee_i64
+            ))
+        })?;
+        if total_fee > self.max_fee_stroops {
+            return Err(OracleServiceError::RpcError(format!(
+                "oracle fee {} stroops exceeds configured maximum {} stroops",
+                total_fee, self.max_fee_stroops
+            )));
+        }
 
         let soroban_data = decode_soroban_data(&sim.transaction_data)?;
         let auth_entries = decode_auth_entries(&sim.results)?;
@@ -805,6 +821,7 @@ mod tests {
             "http://soroban-testnet.stellar.org".to_string(),
             "Test SDF Network ; September 2015".to_string(),
             "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            1_000_000,
         );
         std::env::remove_var("ORACLE_ENV");
         assert!(
@@ -820,6 +837,7 @@ mod tests {
             "https://soroban-testnet.stellar.org".to_string(),
             "Test SDF Network ; September 2015".to_string(),
             "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            1_000_000,
         );
         std::env::remove_var("ORACLE_ENV");
         assert!(

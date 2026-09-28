@@ -43,6 +43,8 @@ pub enum Error {
     DisputeNotFound = 24,
     PendingResultNotFound = 25,
     DisputeAlreadyResolved = 26,
+    /// The dispute voting window has elapsed. Also returned by `dispute_oracle_result`
+    /// when the dispute period has elapsed (`env.ledger().sequence() >= deadline`).
     VotingPeriodElapsed = 27,
     AlreadyVoted = 28,
     NotStaker = 29,
@@ -74,4 +76,7 @@ pub enum Error {
     NotAnOracle = 54,
     /// A deposit for this match is already in progress (reentrancy guard).
     DepositInProgress = 55,
+    /// The dispute's voting deadline plus grace period has not yet elapsed, so the
+    /// no-quorum fallback resolution cannot be applied yet.
+    DisputeFallbackNotElapsed = 56,
 }

@@ -29,6 +29,8 @@ export class ConnectionManager {
   /** Map clientId → raw WebSocket for message delivery */
   private readonly sockets = new Map<string, WebSocket>();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** Track connections per IP for rate limiting */
+  private readonly ipConnectionCount = new Map<string, number>();
 
   constructor(private readonly config: ServerConfig) {
     this.subscriptions = new SubscriptionManager({
@@ -40,9 +42,47 @@ export class ConnectionManager {
     this.wss = new WebSocketServer({
       host: config.host,
       port: config.port,
+      maxPayload: config.maxPayloadBytes,
       // Limit back-pressure: each socket gets its own send queue
       perMessageDeflate: false,
+      verifyClient: (info) => this.verifyClient(info),
     });
+  }
+
+  // ─── Security verification ────────────────────────────────────────────
+
+  private verifyClient(info: { origin: string; req: import('http').IncomingMessage }): boolean {
+    const { origin, req } = info;
+
+    if (this.config.allowedOrigins.length > 0 && !this.config.allowedOrigins.includes('*')) {
+      if (!this.config.allowedOrigins.includes(origin)) {
+        logger.warn({ origin }, 'WebSocket connection rejected: origin not allowed');
+        return false;
+      }
+    }
+
+    const clientIp = this.getClientIp(req);
+    const currentConnections = this.ipConnectionCount.get(clientIp) ?? 0;
+
+    if (currentConnections >= this.config.maxConnectionsPerIp) {
+      logger.warn(
+        { clientIp, currentConnections },
+        'WebSocket connection rejected: too many connections from this IP',
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  private getClientIp(req: import('http').IncomingMessage): string {
+    if (this.config.trustXForwardedFor) {
+      const forwarded = req.headers['x-forwarded-for'] as string | undefined;
+      if (forwarded) {
+        return forwarded.split(',')[0]!.trim();
+      }
+    }
+    return req.socket.remoteAddress ?? 'unknown';
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────────────
@@ -106,10 +146,9 @@ export class ConnectionManager {
 
   private handleConnection(ws: WebSocket, req: import('http').IncomingMessage): void {
     const clientId = randomUUID();
-    const remoteAddress =
-      (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ??
-      req.socket.remoteAddress ??
-      'unknown';
+    const remoteAddress = this.getClientIp(req);
+    const connectionCount = (this.ipConnectionCount.get(remoteAddress) ?? 0) + 1;
+    this.ipConnectionCount.set(remoteAddress, connectionCount);
 
     const state: ClientState = {
       id: clientId,
@@ -168,6 +207,14 @@ export class ConnectionManager {
       );
       this.subscriptions.removeClient(clientId);
       this.sockets.delete(clientId);
+
+      // Decrement per-IP connection count
+      const count = this.ipConnectionCount.get(remoteAddress) ?? 1;
+      if (count <= 1) {
+        this.ipConnectionCount.delete(remoteAddress);
+      } else {
+        this.ipConnectionCount.set(remoteAddress, count - 1);
+      }
     });
 
     ws.on('error', (err) => {

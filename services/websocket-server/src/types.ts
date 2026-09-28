@@ -171,6 +171,14 @@ export interface ServerConfig {
   maxSubscriptionsPerClient: number;
   /** Log level. Default: info */
   logLevel: string;
+  /** Max payload size in bytes. Default: 16384 (16 KiB) */
+  maxPayloadBytes: number;
+  /** Allowed origins (space-separated). Default: * (any) */
+  allowedOrigins: string[];
+  /** Max connections per IP address. Default: 100 */
+  maxConnectionsPerIp: number;
+  /** Trust x-forwarded-for header (set to 'true' when behind a trusted proxy). Default: false */
+  trustXForwardedFor: boolean;
 }
 
 export function loadConfig(): ServerConfig {
@@ -186,5 +194,9 @@ export function loadConfig(): ServerConfig {
     rateLimitWindowMs: Number(process.env.WS_RATE_LIMIT_WINDOW_MS ?? 60_000),
     maxSubscriptionsPerClient: Number(process.env.WS_MAX_SUBSCRIPTIONS_PER_CLIENT ?? 50),
     logLevel: process.env.LOG_LEVEL ?? 'info',
+    maxPayloadBytes: Number(process.env.WS_MAX_PAYLOAD_BYTES ?? 16_384),
+    allowedOrigins: (process.env.WS_ALLOWED_ORIGINS ?? '*').split(' ').filter(Boolean),
+    maxConnectionsPerIp: Number(process.env.WS_MAX_CONNECTIONS_PER_IP ?? 100),
+    trustXForwardedFor: process.env.WS_TRUST_X_FORWARDED_FOR === 'true',
   };
 }

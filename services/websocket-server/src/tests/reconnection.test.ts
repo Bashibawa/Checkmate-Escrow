@@ -163,7 +163,7 @@ describe('WebSocket reconnection handling', () => {
     manager.start();
 
     poller = new EventPoller(config, (event) => manager.broadcast(event));
-    poller.start();
+    await poller.start();
   });
 
   afterEach(async () => {

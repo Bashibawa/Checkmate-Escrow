@@ -18,7 +18,7 @@ connectionManager.start();
 const poller = new EventPoller(config, (event) => {
   connectionManager.broadcast(event);
 });
-poller.start();
+void poller.start();
 
 logger.info(
   {
