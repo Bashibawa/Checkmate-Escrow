@@ -23,8 +23,8 @@ interface ApiResponse<T> {
 export class EventPoller {
   private running = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  /** Highest ledger_sequence we have already dispatched */
-  private highWatermark = 0;
+  /** Watermark: (ledger_sequence, event_index_in_txn) of last dispatched event */
+  private highWatermark: { ledger: number; index: number } = { ledger: 0, index: -1 };
   /** Consecutive failure count (for back-off) */
   private consecutiveFailures = 0;
 
@@ -33,9 +33,10 @@ export class EventPoller {
     private readonly onEvent: EventCallback,
   ) {}
 
-  start(): void {
+  async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    await this.initializeWatermark();
     this.scheduleNext(0); // first poll immediately
   }
 
@@ -48,6 +49,28 @@ export class EventPoller {
   }
 
   // ─── Internal ──────────────────────────────────────────────────────────
+
+  private async initializeWatermark(): Promise<void> {
+    try {
+      const events = await this.fetchNewEvents();
+      if (events.length > 0) {
+        const lastEvent = events[events.length - 1]!;
+        this.highWatermark = {
+          ledger: lastEvent.ledger_sequence,
+          index: lastEvent.event_index_in_txn ?? 0,
+        };
+        logger.info(
+          { ledger: this.highWatermark.ledger, index: this.highWatermark.index },
+          'EventPoller initialized watermark from latest indexed ledger',
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { err },
+        'EventPoller failed to initialize watermark; will start from beginning',
+      );
+    }
+  }
 
   private scheduleNext(delayMs: number): void {
     this.timer = setTimeout(() => {
@@ -62,20 +85,28 @@ export class EventPoller {
       const events = await this.fetchNewEvents();
       this.consecutiveFailures = 0;
 
-      let maxLedger = this.highWatermark;
+      let maxWatermark = { ...this.highWatermark };
       // Sort ascending so callbacks arrive in ledger order
       const sorted = events.sort(
-        (a, b) => a.ledger_sequence - b.ledger_sequence || a.event_index_in_txn! - b.event_index_in_txn!,
+        (a, b) => a.ledger_sequence - b.ledger_sequence || (a.event_index_in_txn ?? 0) - (b.event_index_in_txn ?? 0),
       );
 
       for (const event of sorted) {
-        if (event.ledger_sequence > this.highWatermark) {
+        const eventIndex = event.event_index_in_txn ?? 0;
+        const isNewEvent =
+          event.ledger_sequence > this.highWatermark.ledger ||
+          (event.ledger_sequence === this.highWatermark.ledger && eventIndex > this.highWatermark.index);
+
+        if (isNewEvent) {
           this.onEvent(event);
-          if (event.ledger_sequence > maxLedger) maxLedger = event.ledger_sequence;
+          if (event.ledger_sequence > maxWatermark.ledger ||
+              (event.ledger_sequence === maxWatermark.ledger && eventIndex > maxWatermark.index)) {
+            maxWatermark = { ledger: event.ledger_sequence, index: eventIndex };
+          }
         }
       }
 
-      this.highWatermark = maxLedger;
+      this.highWatermark = maxWatermark;
       this.scheduleNext(this.config.pollIntervalMs);
     } catch (err) {
       this.consecutiveFailures += 1;
