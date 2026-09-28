@@ -810,6 +810,7 @@ impl OracleContract {
                     result: winning.result.clone(),
                     submitted_ledger: env.ledger().sequence(),
                     submitter: oracle.clone(),
+                    confidence: None,
                 },
             );
             env.storage().persistent().extend_ttl(
@@ -978,6 +979,7 @@ impl OracleContract {
                 result: result.clone(),
                 submitted_ledger: env.ledger().sequence(),
                 submitter: admin,
+                confidence: None,
             },
         );
         env.storage().persistent().extend_ttl(
