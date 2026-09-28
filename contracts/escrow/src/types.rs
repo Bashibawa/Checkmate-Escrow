@@ -391,6 +391,25 @@ pub struct PlayerRating {
     pub recorded_ledger: u32,
 }
 
+/// Storage keys for player escrow balance tracking.
+///
+/// Kept as a separate `#[contracttype]` enum rather than added to `DataKey`
+/// for the same reason as other overflow keys: `DataKey` is at its 50-variant
+/// XDR cap.
+///
+/// Instead of computing the player's escrow balance by iterating through all
+/// matches in `PlayerMatches(player)` (which causes read limits), we maintain
+/// a running counter that is updated atomically on every deposit/payout/refund
+/// event.
+#[contracttype]
+pub enum PlayerEscrowKey {
+    /// Current aggregate escrow balance for a player: sum of all non-terminal
+    /// stakes where the player has deposited. Updated incrementally on deposit,
+    /// payout (winner/draw), and refund (cancel/expire) rather than recomputed
+    /// by iterating all matches.
+    Balance(Address),
+}
+
 /// The lifecycle event that triggered a balance snapshot.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
