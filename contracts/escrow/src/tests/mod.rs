@@ -212,3 +212,4 @@ mod issue_1615;
 mod issue_1616;
 mod player_rating;
 mod issue_1525;
+mod issue_1570;
