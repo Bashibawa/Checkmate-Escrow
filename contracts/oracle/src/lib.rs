@@ -1568,12 +1568,26 @@ impl OracleContract {
         }
     }
 
-    /// Invalidate/remove a cached result for a specific game and platform.
-    pub fn invalidate_cache(env: Env, game_id: String, platform: Platform) {
+    /// Invalidate/remove a cached result for a specific game and platform. Admin-only.
+    ///
+    /// # Errors
+    /// - [`Error::Unauthorized`] — contract has not been initialized.
+    pub fn invalidate_cache(
+        env: Env,
+        game_id: String,
+        platform: Platform,
+    ) -> Result<(), Error> {
         extend_instance_ttl(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+        admin.require_auth();
         env.storage()
             .persistent()
             .remove(&DataKey::OracleCache(game_id, platform));
+        Ok(())
     }
 
     /// Return the admin address stored in the contract.
