@@ -154,6 +154,8 @@ pub struct Match {
     /// executes (#1517 fix: mutual-consent rollback).
     pub rollback_vote_player1: bool,
     pub rollback_vote_player2: bool,
+    /// Tournament round for bracket matches.
+    pub round: Option<u32>,
 }
 
 #[contracttype]
@@ -331,6 +333,12 @@ pub enum DataKey {
     DepositInProgress(u64),
     /// Combined temp + pending oracle rotation state (see `OracleRotationState`).
     OracleRotation,
+}
+
+/// Storage keys for tournament bracket registration.
+#[contracttype]
+pub enum BracketKey {
+    Organizer(u64),
 }
 
 /// Storage keys for multi-oracle consensus deadlock tracking.
