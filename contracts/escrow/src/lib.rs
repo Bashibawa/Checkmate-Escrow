@@ -1776,6 +1776,9 @@ impl EscrowContract {
             m.player2_deposited = true;
         }
 
+        // Update the player's escrow balance counter: add the stake amount
+        Self::update_player_escrow_balance(&env, &player, m.stake_amount);
+
         // Refresh the last-activity timestamp so that cancellation-fee /
         // rollback dispute windows count from the most recent deposit.
         m.last_heartbeat = env.ledger().timestamp();
@@ -1962,6 +1965,11 @@ impl EscrowContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::Match(match_id), &m);
+            
+            // Update escrow balance counters: remove stakes for both players (payout completed)
+            Self::update_player_escrow_balance(env, &m.player1, -m.stake_amount);
+            Self::update_player_escrow_balance(env, &m.player2, -m.stake_amount);
+            
             Self::record_snapshot(env, &m, SnapshotReason::Completed);
             Self::record_player_snapshot(env, &m.player1);
             Self::record_player_snapshot(env, &m.player2);
@@ -1978,6 +1986,7 @@ impl EscrowContract {
             Ok(())
         } else {
             // Delayed payout: store the pending result and set dispute deadline
+            // When dispute period expires, the balance counter will be updated in finalize_match
             let deadline = env
                 .ledger()
                 .sequence()
@@ -2293,6 +2302,24 @@ impl EscrowContract {
             MATCH_TTL_LEDGERS,
         );
 
+        // Update escrow balance counters: remove the stake for each deposited player
+        if m.player1_deposited {
+            Self::update_player_escrow_balance(&env, &m.player1, -m.stake_amount);
+        }
+        if m.player2_deposited {
+            // For multi-token matches, use the actual amount that was deposited by player2
+            let amount_p2 = if is_multi_token {
+                m.stake_amount
+                    .checked_mul(m.conversion_rate.unwrap_or(0))
+                    .unwrap_or(0)
+                    .checked_div(10_000_000)
+                    .unwrap_or(0)
+            } else {
+                m.stake_amount
+            };
+            Self::update_player_escrow_balance(&env, &m.player2, -amount_p2);
+        }
+
         Self::record_snapshot(&env, &m, SnapshotReason::Cancelled);
         // Player-level snapshots are recorded only for refunded parties —
         // non-depositors' escrow balance is already 0 and would not change.
@@ -2484,6 +2511,24 @@ impl EscrowContract {
             MATCH_TTL_LEDGERS,
             MATCH_TTL_LEDGERS,
         );
+
+        // Update escrow balance counters: remove the stake for each deposited player
+        if m.player1_deposited {
+            Self::update_player_escrow_balance(&env, &m.player1, -m.stake_amount);
+        }
+        if m.player2_deposited {
+            // For multi-token matches, use the actual amount that was deposited by player2
+            let amount_p2 = if is_multi_token {
+                m.stake_amount
+                    .checked_mul(m.conversion_rate.unwrap_or(0))
+                    .unwrap_or(0)
+                    .checked_div(10_000_000)
+                    .unwrap_or(0)
+            } else {
+                m.stake_amount
+            };
+            Self::update_player_escrow_balance(&env, &m.player2, -amount_p2);
+        }
 
         Self::record_snapshot(&env, &m, SnapshotReason::Cancelled);
         // Player-level snapshots are recorded only for refunded parties —
@@ -3840,6 +3885,10 @@ impl EscrowContract {
         Self::remove_active_match_indexed(&env, &m.player1, match_id);
         Self::remove_active_match_indexed(&env, &m.player2, match_id);
 
+        // Update escrow balance counters: remove stakes for both players (payout completed)
+        Self::update_player_escrow_balance(&env, &m.player1, -m.stake_amount);
+        Self::update_player_escrow_balance(&env, &m.player2, -m.stake_amount);
+
         m.state = MatchState::Completed;
         m.completed_ledger = Some(env.ledger().sequence());
 
@@ -3856,6 +3905,8 @@ impl EscrowContract {
         );
 
         Self::record_snapshot(&env, &m, SnapshotReason::Finalized);
+        Self::record_player_snapshot(&env, &m.player1);
+        Self::record_player_snapshot(&env, &m.player2);
 
         env.events().publish(
             (Symbol::new(&env, "match"), Symbol::new(&env, "finalized")),
@@ -4778,33 +4829,39 @@ impl EscrowContract {
     /// matches the existing `escrow_balance_of` routine — callers are
     /// expected to operate in realistic stake ranges where overflow is not
     /// a concern.
+    /// Get the current player escrow balance from the maintained counter.
+    /// This is O(1) instead of O(n) in the number of matches.
+    /// 
+    /// The counter is updated atomically on every deposit/refund/payout event
+    /// and represents the sum of all non-terminal stakes where the player
+    /// has deposited.
     fn player_escrow_balance(env: &Env, player: &Address) -> i128 {
-        let key = DataKey::PlayerMatches(player.clone());
-        let player_matches: soroban_sdk::Vec<u64> = env
+        env.storage()
+            .persistent()
+            .get::<PlayerEscrowKey, i128>(&PlayerEscrowKey::Balance(player.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Update a player's escrow balance counter by adding `delta` to the current balance.
+    /// 
+    /// Called when:
+    /// - Player deposits: delta = +stake_amount
+    /// - Match completes/is cancelled/expires: delta = -stake_amount (balance zeroed out)
+    fn update_player_escrow_balance(env: &Env, player: &Address, delta: i128) {
+        let key = PlayerEscrowKey::Balance(player.clone());
+        let current: i128 = env
             .storage()
             .persistent()
-            .get(&key)
-            .unwrap_or_else(|| soroban_sdk::vec![env]);
-
-        let mut total: i128 = 0;
-        for m_id in player_matches.iter() {
-            if let Some(m) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, Match>(&DataKey::Match(m_id))
-            {
-                let deposited = (m.player1 == *player && m.player1_deposited)
-                    || (m.player2 == *player && m.player2_deposited);
-                if !deposited {
-                    continue;
-                }
-                if m.state == MatchState::Completed || m.state == MatchState::Cancelled {
-                    continue;
-                }
-                total = total.saturating_add(m.stake_amount);
-            }
-        }
-        total
+            .get::<PlayerEscrowKey, i128>(&key)
+            .unwrap_or(0);
+        
+        let new_balance = current.saturating_add(delta);
+        env.storage()
+            .persistent()
+            .set::<PlayerEscrowKey, i128>(&key, &new_balance);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
     }
 
     /// Record a player-level balance snapshot for `player` at the current
