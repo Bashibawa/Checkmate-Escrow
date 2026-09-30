@@ -1,7 +1,6 @@
 #![no_std]
-// Several contract entry points (e.g. `create_match_with_conversion`) take one
-// parameter per on-chain field; grouping them into a struct would change the
-// public contract ABI, so the arg-count lint is suppressed crate-wide instead.
+// Public entry points keep their explicit arguments for ABI compatibility;
+// their private shared implementation groups those arguments internally.
 #![allow(clippy::too_many_arguments)]
 
 #[cfg(test)]
@@ -44,10 +43,11 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 use types::{
-    BalanceAtTimestamp, BalanceSnapshot, DataKey, Dispute, DisputeBondTier, DisputeState, FeeTier,
-    Match, MatchState, OracleRotationState, PendingAdminProposal, PendingOracleRotation, Platform,
-    PlatformStats, PlayerBalanceSnapshot, PlayerEscrowKey, PlayerFreezeKey, PlayerRating, PlayerRatingKey,
-    PlayerStats, PlayerTier, ProtocolConfig, SnapshotReason, TempOracleRotation, Winner,
+    BalanceAtTimestamp, BalanceSnapshot, BracketKey, DataKey, Dispute, DisputeBondTier,
+    DisputeState, FeeTier, Match, MatchState, OracleRotationState, PendingAdminProposal,
+    PendingOracleRotation, Platform, PlatformStats, PlayerBalanceSnapshot, PlayerFreezeKey,
+    PlayerRating, PlayerRatingKey, PlayerStats, PlayerTier, ProtocolConfig, SnapshotReason,
+    TempOracleRotation, Winner,
 };
 
 /// ~30 days at 5s/ledger. Used as the default TTL and expiration threshold.
@@ -194,6 +194,20 @@ fn extend_instance_ttl(env: &Env) {
 
 #[contract]
 pub struct EscrowContract;
+
+struct MatchParams {
+    player1: Address,
+    player2: Address,
+    stake_amount: i128,
+    token: Address,
+    token_b: Option<Address>,
+    conversion_rate: Option<i128>,
+    game_id: String,
+    platform: Platform,
+    referrer: Option<Address>,
+    bracket_id: Option<u64>,
+    round: Option<u32>,
+}
 
 #[contractimpl]
 impl EscrowContract {
@@ -1219,6 +1233,239 @@ impl EscrowContract {
         Ok(())
     }
 
+    fn create_match_internal(env: Env, params: MatchParams) -> Result<u64, Error> {
+        extend_instance_ttl(&env);
+        params.player1.require_auth();
+
+        if let Some(bracket_id) = params.bracket_id {
+            let organizer: Address = env
+                .storage()
+                .persistent()
+                .get(&BracketKey::Organizer(bracket_id))
+                .ok_or(Error::Unauthorized)?;
+            organizer.require_auth();
+        }
+
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(Error::ContractPaused);
+        }
+
+        Self::require_player_not_frozen(&env, &params.player1)?;
+        Self::require_player_not_frozen(&env, &params.player2)?;
+
+        if Self::is_token_blacklisted(env.clone(), params.token.clone())
+            || params
+                .token_b
+                .as_ref()
+                .map(|token| Self::is_token_blacklisted(env.clone(), token.clone()))
+                .unwrap_or(false)
+        {
+            return Err(Error::TokenNotAllowed);
+        }
+
+        let allowlist_enforced: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::AllowlistEnforced)
+            .unwrap_or(false);
+        if allowlist_enforced
+            && (!Self::is_token_allowed(env.clone(), params.token.clone())
+                || params
+                    .token_b
+                    .as_ref()
+                    .map(|token| !Self::is_token_allowed(env.clone(), token.clone()))
+                    .unwrap_or(false))
+        {
+            return Err(Error::TokenNotAllowed);
+        }
+
+        let protocol_cfg = Self::get_config(&env);
+        if protocol_cfg.stablecoin_only_mode
+            && (!Self::check_is_stablecoin(&env, &params.token)
+                || params
+                    .token_b
+                    .as_ref()
+                    .map(|token| !Self::check_is_stablecoin(&env, token))
+                    .unwrap_or(false))
+        {
+            return Err(Error::NotStablecoin);
+        }
+
+        if params.stake_amount < protocol_cfg.minimum_stake
+            || params.conversion_rate.map(|rate| rate <= 0).unwrap_or(false)
+        {
+            return Err(Error::InvalidAmount);
+        }
+        if let Some(max_stake) = protocol_cfg.maximum_stake {
+            if params.stake_amount > max_stake {
+                return Err(Error::InvalidAmount);
+            }
+        }
+        if params
+            .referrer
+            .as_ref()
+            .map(|referrer| {
+                referrer == &params.player1
+                    || referrer == &params.player2
+                    || referrer == &env.current_contract_address()
+            })
+            .unwrap_or(false)
+        {
+            return Err(Error::InvalidAddress);
+        }
+        Self::require_player_tier_for_stake(&env, &params.player1, params.stake_amount)?;
+        Self::require_player_tier_for_stake(&env, &params.player2, params.stake_amount)?;
+        Self::validate_game_id_format(&params.game_id, &params.platform)?;
+
+        if params.player1 == params.player2
+            || params.player2 == env.current_contract_address()
+        {
+            return Err(Error::InvalidPlayers);
+        }
+        if params.token_b.is_some() != params.conversion_rate.is_some() {
+            return Err(Error::InvalidAmount);
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::GameId(params.game_id.clone()))
+        {
+            return Err(Error::DuplicateGameId);
+        }
+
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MatchCount)
+            .unwrap_or(0);
+        if env.storage().persistent().has(&DataKey::Match(id)) {
+            return Err(Error::AlreadyExists);
+        }
+        let next_id = id.checked_add(1).ok_or(Error::Overflow)?;
+
+        let conversion_rate_ledger = if let (Some(token_b), Some(rate)) =
+            (&params.token_b, params.conversion_rate)
+        {
+            let oracle_address: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Oracle)
+                .ok_or(Error::Unauthorized)?;
+            let oracle_rate: i128 = env.invoke_contract(
+                &oracle_address,
+                &Symbol::new(&env, "get_rate"),
+                soroban_sdk::vec![&env, params.token.to_val(), token_b.to_val()],
+            );
+            let rate_100 = rate.checked_mul(100).ok_or(Error::Overflow)?;
+            let oracle_lower = oracle_rate.checked_mul(95).ok_or(Error::Overflow)?;
+            let oracle_upper = oracle_rate.checked_mul(105).ok_or(Error::Overflow)?;
+            if rate_100 < oracle_lower || rate_100 > oracle_upper {
+                return Err(Error::ConversionRateOutOfBounds);
+            }
+            Some(env.ledger().sequence())
+        } else {
+            None
+        };
+
+        let m = Match {
+            id,
+            player1: params.player1.clone(),
+            player2: params.player2.clone(),
+            stake_amount: params.stake_amount,
+            token: params.token,
+            game_id: params.game_id,
+            platform: params.platform,
+            state: MatchState::Pending,
+            player1_deposited: false,
+            player2_deposited: false,
+            created_ledger: env.ledger().sequence(),
+            completed_ledger: None,
+            winner: Winner::None,
+            vested_at: None,
+            player1_claimed: false,
+            player2_claimed: false,
+            conversion_rate: params.conversion_rate,
+            token_b: params.token_b,
+            conversion_rate_ledger,
+            paused_ledger: None,
+            total_pause_duration: 0,
+            referrer: params.referrer.clone(),
+            last_heartbeat: env.ledger().timestamp(),
+            bracket_id: params.bracket_id,
+            round: params.round,
+            activated_at: None,
+            rollback_vote_player1: false,
+            rollback_vote_player2: false,
+        };
+
+        env.storage().persistent().set(&DataKey::Match(id), &m);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Match(id),
+            MATCH_TTL_LEDGERS,
+            MATCH_TTL_LEDGERS,
+        );
+        env.storage().instance().set(&DataKey::MatchCount, &next_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::GameId(m.game_id.clone()), &true);
+        env.storage().persistent().extend_ttl(
+            &DataKey::GameId(m.game_id.clone()),
+            MATCH_TTL_LEDGERS,
+            MATCH_TTL_LEDGERS,
+        );
+
+        for player in [&m.player1, &m.player2] {
+            let mut player_matches: soroban_sdk::Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PlayerMatches((*player).clone()))
+                .unwrap_or_else(|| soroban_sdk::vec![&env]);
+            player_matches.push_back(id);
+            env.storage()
+                .persistent()
+                .set(&DataKey::PlayerMatches((*player).clone()), &player_matches);
+            env.storage().persistent().extend_ttl(
+                &DataKey::PlayerMatches((*player).clone()),
+                MATCH_TTL_LEDGERS,
+                MATCH_TTL_LEDGERS,
+            );
+        }
+
+        Self::record_snapshot(&env, &m, SnapshotReason::Created);
+        Self::record_platform_match_created(&env, m.stake_amount);
+
+        if let Some(bracket_id) = m.bracket_id {
+            env.events().publish(
+                (Symbol::new(&env, "match"), Symbol::new(&env, "bracket_created")),
+                (
+                    id,
+                    bracket_id,
+                    m.round.unwrap_or(0),
+                    m.player1,
+                    m.player2,
+                    m.stake_amount,
+                ),
+            );
+        } else if let Some(referrer) = m.referrer {
+            env.events().publish(
+                (Symbol::new(&env, "match"), symbol_short!("created")),
+                (id, m.player1, m.player2, m.stake_amount, referrer),
+            );
+        } else {
+            env.events().publish(
+                (Symbol::new(&env, "match"), symbol_short!("created")),
+                (id, m.player1, m.player2, m.stake_amount),
+            );
+        }
+
+        Ok(id)
+    }
+
     /// Create a new match. Both players must call `deposit` before the game starts.
     ///
     /// # Parameters
@@ -1249,176 +1496,59 @@ impl EscrowContract {
         game_id: String,
         platform: Platform,
     ) -> Result<u64, Error> {
-        extend_instance_ttl(&env);
-        player1.require_auth();
-
-        if env
-            .storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
-        {
-            return Err(Error::ContractPaused);
-        }
-
-        // Frozen players cannot create or join new matches — targeted
-        // intervention without pausing the whole contract.
-        Self::require_player_not_frozen(&env, &player1)?;
-        Self::require_player_not_frozen(&env, &player2)?;
-
-        // Blacklisted tokens are permanently rejected, regardless of allowlist status.
-        if Self::is_token_blacklisted(env.clone(), token.clone()) {
-            return Err(Error::TokenNotAllowed);
-        }
-
-        // Check allowlist enforcement
-        let allowlist_enforced: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::AllowlistEnforced)
-            .unwrap_or(false);
-        if allowlist_enforced && !Self::is_token_allowed(env.clone(), token.clone()) {
-            return Err(Error::TokenNotAllowed);
-        }
-
-        // Stablecoin-only mode: reject non-stablecoin tokens when enabled
-        let protocol_cfg = Self::get_config(&env);
-        if protocol_cfg.stablecoin_only_mode && !Self::check_is_stablecoin(&env, &token) {
-            return Err(Error::NotStablecoin);
-        }
-
-        if stake_amount < protocol_cfg.minimum_stake {
-            return Err(Error::InvalidAmount);
-        }
-        if let Some(max_stake) = protocol_cfg.maximum_stake {
-            if stake_amount > max_stake {
-                return Err(Error::InvalidAmount);
-            }
-        }
-        Self::require_player_tier_for_stake(&env, &player1, stake_amount)?;
-        Self::require_player_tier_for_stake(&env, &player2, stake_amount)?;
-        Self::validate_game_id_format(&game_id, &platform)?;
-
-        // Reject if either player is invalid
-        if player1 == player2 {
-            return Err(Error::InvalidPlayers);
-        }
-        if player2 == env.current_contract_address() {
-            return Err(Error::InvalidPlayers);
-        }
-
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::GameId(game_id.clone()))
-        {
-            return Err(Error::DuplicateGameId);
-        }
-
-        let id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MatchCount)
-            .unwrap_or(0);
-
-        if env.storage().persistent().has(&DataKey::Match(id)) {
-            return Err(Error::AlreadyExists);
-        }
-
-        let m = Match {
-            id,
-            player1: player1.clone(),
-            player2: player2.clone(),
-            stake_amount,
-            token,
-            game_id,
-            platform,
-            state: MatchState::Pending,
-            player1_deposited: false,
-            player2_deposited: false,
-            created_ledger: env.ledger().sequence(),
-            completed_ledger: None,
-            winner: Winner::None,
-            vested_at: None,
-            player1_claimed: false,
-            player2_claimed: false,
-            conversion_rate: None,
-            token_b: None,
-            conversion_rate_ledger: None,
-            paused_ledger: None,
-            total_pause_duration: 0,
-            referrer: None,
-            last_heartbeat: env.ledger().timestamp(),
-            bracket_id: None,
-            activated_at: None,
-            rollback_vote_player1: false,
-            rollback_vote_player2: false,
-        };
-
-        env.storage().persistent().set(&DataKey::Match(id), &m);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Match(id),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-        // Guard against u64 overflow in release mode where wrapping would occur silently
-        let next_id = id.checked_add(1).ok_or(Error::Overflow)?;
-        env.storage().instance().set(&DataKey::MatchCount, &next_id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::GameId(m.game_id.clone()), &true);
-        env.storage().persistent().extend_ttl(
-            &DataKey::GameId(m.game_id.clone()),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        // Add match ID to both players' match lists
-        let mut player1_matches: soroban_sdk::Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::PlayerMatches(player1.clone()))
-            .unwrap_or_else(|| soroban_sdk::vec![&env]);
-        player1_matches.push_back(id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::PlayerMatches(player1.clone()), &player1_matches);
-        env.storage().persistent().extend_ttl(
-            &DataKey::PlayerMatches(player1),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        let mut player2_matches: soroban_sdk::Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::PlayerMatches(player2.clone()))
-            .unwrap_or_else(|| soroban_sdk::vec![&env]);
-        player2_matches.push_back(id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::PlayerMatches(player2.clone()), &player2_matches);
-        env.storage().persistent().extend_ttl(
-            &DataKey::PlayerMatches(player2),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        Self::record_snapshot(&env, &m, SnapshotReason::Created);
-        Self::record_platform_match_created(&env, stake_amount);
-
-        env.events().publish(
-            (Symbol::new(&env, "match"), symbol_short!("created")),
-            (id, m.player1, m.player2, stake_amount),
-        );
-
-        Ok(id)
+        Self::create_match_internal(
+            env,
+            MatchParams {
+                player1,
+                player2,
+                stake_amount,
+                token,
+                token_b: None,
+                conversion_rate: None,
+                game_id,
+                platform,
+                referrer: None,
+                bracket_id: None,
+                round: None,
+            },
+        )
     }
 
-    /// Create a new match for tournament brackets.
-    ///
-    /// This variant allows bracket matches to be linked on-chain, enabling
-    /// automated bracket progression for multi-game tournaments.
+    /// Register a bracket and its organiser. Only the admin may register IDs.
+    pub fn register_bracket(
+        env: Env,
+        admin: Address,
+        bracket_id: u64,
+        organizer: Address,
+    ) -> Result<(), Error> {
+        extend_instance_ttl(&env);
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+
+        let key = BracketKey::Organizer(bracket_id);
+        if env.storage().persistent().has(&key) {
+            return Err(Error::AlreadyExists);
+        }
+        env.storage().persistent().set(&key, &organizer);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+        env.events().publish(
+            (Symbol::new(&env, "match"), Symbol::new(&env, "bracket_registered")),
+            (bracket_id, organizer),
+        );
+        Ok(())
+    }
+
+    /// Create a tournament match after its registered organiser authorizes it.
+    /// The `round` value is stored on the match and emitted with its creation event.
     pub fn create_match_tournament(
         env: Env,
         bracket_id: u64,
@@ -1430,164 +1560,22 @@ impl EscrowContract {
         game_id: String,
         platform: Platform,
     ) -> Result<u64, Error> {
-        extend_instance_ttl(&env);
-        player1.require_auth();
-
-        if env
-            .storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
-        {
-            return Err(Error::ContractPaused);
-        }
-
-        // Blacklisted tokens are permanently rejected, regardless of allowlist status.
-        if Self::is_token_blacklisted(env.clone(), token.clone()) {
-            return Err(Error::TokenNotAllowed);
-        }
-
-        // Check allowlist enforcement
-        let allowlist_enforced: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::AllowlistEnforced)
-            .unwrap_or(false);
-        if allowlist_enforced && !Self::is_token_allowed(env.clone(), token.clone()) {
-            return Err(Error::TokenNotAllowed);
-        }
-
-        // Stablecoin-only mode: reject non-stablecoin tokens when enabled
-        let protocol_cfg = Self::get_config(&env);
-        if protocol_cfg.stablecoin_only_mode && !Self::check_is_stablecoin(&env, &token) {
-            return Err(Error::NotStablecoin);
-        }
-
-        if stake_amount < protocol_cfg.minimum_stake {
-            return Err(Error::InvalidAmount);
-        }
-        if let Some(max_stake) = protocol_cfg.maximum_stake {
-            if stake_amount > max_stake {
-                return Err(Error::InvalidAmount);
-            }
-        }
-        Self::require_player_tier_for_stake(&env, &player1, stake_amount)?;
-        Self::require_player_tier_for_stake(&env, &player2, stake_amount)?;
-        Self::validate_game_id_format(&game_id, &platform)?;
-
-        // Reject if either player is invalid
-        if player1 == player2 {
-            return Err(Error::InvalidPlayers);
-        }
-        if player2 == env.current_contract_address() {
-            return Err(Error::InvalidPlayers);
-        }
-
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::GameId(game_id.clone()))
-        {
-            return Err(Error::DuplicateGameId);
-        }
-
-        let id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MatchCount)
-            .unwrap_or(0);
-
-        if env.storage().persistent().has(&DataKey::Match(id)) {
-            return Err(Error::AlreadyExists);
-        }
-
-        let m = Match {
-            id,
-            player1: player1.clone(),
-            player2: player2.clone(),
-            stake_amount,
-            token,
-            game_id,
-            platform,
-            state: MatchState::Pending,
-            player1_deposited: false,
-            player2_deposited: false,
-            created_ledger: env.ledger().sequence(),
-            completed_ledger: None,
-            winner: Winner::None,
-            vested_at: None,
-            player1_claimed: false,
-            player2_claimed: false,
-            conversion_rate: None,
-            token_b: None,
-            conversion_rate_ledger: None,
-            paused_ledger: None,
-            total_pause_duration: 0,
-            referrer: None,
-            last_heartbeat: env.ledger().timestamp(),
-            bracket_id: Some(bracket_id),
-            activated_at: None,
-            rollback_vote_player1: false,
-            rollback_vote_player2: false,
-        };
-
-        env.storage().persistent().set(&DataKey::Match(id), &m);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Match(id),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-        let next_id = id.checked_add(1).ok_or(Error::Overflow)?;
-        env.storage().instance().set(&DataKey::MatchCount, &next_id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::GameId(m.game_id.clone()), &true);
-        env.storage().persistent().extend_ttl(
-            &DataKey::GameId(m.game_id.clone()),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        // Add match ID to both players' match lists
-        let mut player1_matches: soroban_sdk::Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::PlayerMatches(player1.clone()))
-            .unwrap_or_else(|| soroban_sdk::vec![&env]);
-        player1_matches.push_back(id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::PlayerMatches(player1.clone()), &player1_matches);
-        env.storage().persistent().extend_ttl(
-            &DataKey::PlayerMatches(player1),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        let mut player2_matches: soroban_sdk::Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::PlayerMatches(player2.clone()))
-            .unwrap_or_else(|| soroban_sdk::vec![&env]);
-        player2_matches.push_back(id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::PlayerMatches(player2.clone()), &player2_matches);
-        env.storage().persistent().extend_ttl(
-            &DataKey::PlayerMatches(player2),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        Self::record_snapshot(&env, &m, SnapshotReason::Created);
-        Self::record_platform_match_created(&env, stake_amount);
-
-        env.events().publish(
-            (Symbol::new(&env, "match"), Symbol::new(&env, "bracket_created")),
-            (id, bracket_id, round, m.player1, m.player2, stake_amount),
-        );
-
-        Ok(id)
+        Self::create_match_internal(
+            env,
+            MatchParams {
+                player1,
+                player2,
+                stake_amount,
+                token,
+                token_b: None,
+                conversion_rate: None,
+                game_id,
+                platform,
+                referrer: None,
+                bracket_id: Some(bracket_id),
+                round: Some(round),
+            },
+        )
     }
 
     /// Get all matches for a specific tournament bracket.
@@ -1632,203 +1620,22 @@ impl EscrowContract {
         game_id: String,
         platform: Platform,
     ) -> Result<u64, Error> {
-        extend_instance_ttl(&env);
-        player1.require_auth();
-
-        if env
-            .storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
-        {
-            return Err(Error::ContractPaused);
-        }
-
-        // Frozen players cannot create or join new matches — targeted
-        // intervention without pausing the whole contract.
-        Self::require_player_not_frozen(&env, &player1)?;
-        Self::require_player_not_frozen(&env, &player2)?;
-
-        // Blacklisted tokens are permanently rejected, regardless of allowlist status.
-        if Self::is_token_blacklisted(env.clone(), token_a.clone())
-            || Self::is_token_blacklisted(env.clone(), token_b.clone())
-        {
-            return Err(Error::TokenNotAllowed);
-        }
-
-        // Check allowlist enforcement for both tokens
-        let allowlist_enforced: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::AllowlistEnforced)
-            .unwrap_or(false);
-        if allowlist_enforced
-            && (!Self::is_token_allowed(env.clone(), token_a.clone())
-                || !Self::is_token_allowed(env.clone(), token_b.clone()))
-        {
-            return Err(Error::TokenNotAllowed);
-        }
-
-        // Stablecoin-only mode: reject non-stablecoin tokens when enabled
-        let protocol_cfg = Self::get_config(&env);
-        if protocol_cfg.stablecoin_only_mode
-            && (!Self::check_is_stablecoin(&env, &token_a)
-                || !Self::check_is_stablecoin(&env, &token_b))
-        {
-            return Err(Error::NotStablecoin);
-        }
-
-        if stake_amount < protocol_cfg.minimum_stake || rate <= 0 {
-            return Err(Error::InvalidAmount);
-        }
-        if let Some(max_stake) = protocol_cfg.maximum_stake {
-            if stake_amount > max_stake {
-                return Err(Error::InvalidAmount);
-            }
-        }
-        if game_id.is_empty() || game_id.len() > MAX_GAME_ID_LEN {
-            return Err(Error::InvalidGameId);
-        }
-
-        // Reject if either player is invalid
-        if player1 == player2 {
-            return Err(Error::InvalidPlayers);
-        }
-        if player2 == env.current_contract_address() {
-            return Err(Error::InvalidPlayers);
-        }
-
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::GameId(game_id.clone()))
-        {
-            return Err(Error::DuplicateGameId);
-        }
-
-        let id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MatchCount)
-            .unwrap_or(0);
-
-        if env.storage().persistent().has(&DataKey::Match(id)) {
-            return Err(Error::AlreadyExists);
-        }
-
-        // Oracle call to verify conversion rate within ±5%
-        let oracle_address: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Oracle)
-            .ok_or(Error::Unauthorized)?;
-
-        // Fetch oracle rate from the oracle contract
-        let oracle_rate: i128 = env.invoke_contract(
-            &oracle_address,
-            &Symbol::new(&env, "get_rate"),
-            soroban_sdk::vec![&env, token_a.to_val(), token_b.to_val()],
-        );
-
-        // Verify conversion rate within ±5% of oracle rate
-        // Tolerance: rate must be within [oracle_rate * 0.95, oracle_rate * 1.05]
-        // Equivalently: rate * 100 >= oracle_rate * 95 && rate * 100 <= oracle_rate * 105
-        let rate_100 = rate.checked_mul(100).ok_or(Error::Overflow)?;
-        let oracle_lower = oracle_rate.checked_mul(95).ok_or(Error::Overflow)?;
-        let oracle_upper = oracle_rate.checked_mul(105).ok_or(Error::Overflow)?;
-
-        if rate_100 < oracle_lower || rate_100 > oracle_upper {
-            return Err(Error::ConversionRateOutOfBounds);
-        }
-
-        let m = Match {
-            id,
-            player1: player1.clone(),
-            player2: player2.clone(),
-            stake_amount,
-            token: token_a,
-            game_id,
-            platform,
-            state: MatchState::Pending,
-            player1_deposited: false,
-            player2_deposited: false,
-            created_ledger: env.ledger().sequence(),
-            completed_ledger: None,
-            winner: Winner::None,
-            vested_at: None,
-            player1_claimed: false,
-            player2_claimed: false,
-            conversion_rate: Some(rate),
-            token_b: Some(token_b),
-            conversion_rate_ledger: Some(env.ledger().sequence()),
-            paused_ledger: None,
-            total_pause_duration: 0,
-            referrer: None,
-            last_heartbeat: env.ledger().timestamp(),
-            bracket_id: None,
-            activated_at: None,
-            rollback_vote_player1: false,
-            rollback_vote_player2: false,
-        };
-
-        env.storage().persistent().set(&DataKey::Match(id), &m);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Match(id),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        let next_id = id.checked_add(1).ok_or(Error::Overflow)?;
-        env.storage().instance().set(&DataKey::MatchCount, &next_id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::GameId(m.game_id.clone()), &true);
-        env.storage().persistent().extend_ttl(
-            &DataKey::GameId(m.game_id.clone()),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        // Add match ID to both players' match lists
-        let mut player1_matches: soroban_sdk::Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::PlayerMatches(player1.clone()))
-            .unwrap_or_else(|| soroban_sdk::vec![&env]);
-        player1_matches.push_back(id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::PlayerMatches(player1.clone()), &player1_matches);
-        env.storage().persistent().extend_ttl(
-            &DataKey::PlayerMatches(player1),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        let mut player2_matches: soroban_sdk::Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::PlayerMatches(player2.clone()))
-            .unwrap_or_else(|| soroban_sdk::vec![&env]);
-        player2_matches.push_back(id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::PlayerMatches(player2.clone()), &player2_matches);
-        env.storage().persistent().extend_ttl(
-            &DataKey::PlayerMatches(player2),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        Self::record_snapshot(&env, &m, SnapshotReason::Created);
-        Self::record_platform_match_created(&env, stake_amount);
-
-        env.events().publish(
-            (Symbol::new(&env, "match"), symbol_short!("created")),
-            (id, m.player1, m.player2, stake_amount),
-        );
-
-        Ok(id)
+        Self::create_match_internal(
+            env,
+            MatchParams {
+                player1,
+                player2,
+                stake_amount,
+                token: token_a,
+                token_b: Some(token_b),
+                conversion_rate: Some(rate),
+                game_id,
+                platform,
+                referrer: None,
+                bracket_id: None,
+                round: None,
+            },
+        )
     }
 
     /// Create a match and associate a referrer address for fee sharing.
@@ -1850,161 +1657,22 @@ impl EscrowContract {
         platform: Platform,
         referrer: Address,
     ) -> Result<u64, Error> {
-        extend_instance_ttl(&env);
-        player1.require_auth();
-
-        if env
-            .storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
-        {
-            return Err(Error::ContractPaused);
-        }
-
-        // Frozen players cannot create or join new matches — targeted
-        // intervention without pausing the whole contract.
-        Self::require_player_not_frozen(&env, &player1)?;
-        Self::require_player_not_frozen(&env, &player2)?;
-
-        // Blacklisted tokens are permanently rejected, regardless of allowlist status.
-        if Self::is_token_blacklisted(env.clone(), token.clone()) {
-            return Err(Error::TokenNotAllowed);
-        }
-
-        let allowlist_enforced: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::AllowlistEnforced)
-            .unwrap_or(false);
-        if allowlist_enforced && !Self::is_token_allowed(env.clone(), token.clone()) {
-            return Err(Error::TokenNotAllowed);
-        }
-
-        let protocol_cfg = Self::get_config(&env);
-        if stake_amount < protocol_cfg.minimum_stake {
-            return Err(Error::InvalidAmount);
-        }
-        if let Some(max_stake) = protocol_cfg.maximum_stake {
-            if stake_amount > max_stake {
-                return Err(Error::InvalidAmount);
-            }
-        }
-        Self::require_player_tier_for_stake(&env, &player1, stake_amount)?;
-        Self::require_player_tier_for_stake(&env, &player2, stake_amount)?;
-        Self::validate_game_id_format(&game_id, &platform)?;
-
-        if player1 == player2 {
-            return Err(Error::InvalidPlayers);
-        }
-        if player2 == env.current_contract_address() {
-            return Err(Error::InvalidPlayers);
-        }
-
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::GameId(game_id.clone()))
-        {
-            return Err(Error::DuplicateGameId);
-        }
-
-        let id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MatchCount)
-            .unwrap_or(0);
-
-        if env.storage().persistent().has(&DataKey::Match(id)) {
-            return Err(Error::AlreadyExists);
-        }
-
-        let m = Match {
-            id,
-            player1: player1.clone(),
-            player2: player2.clone(),
-            stake_amount,
-            token,
-            game_id,
-            platform,
-            state: MatchState::Pending,
-            player1_deposited: false,
-            player2_deposited: false,
-            created_ledger: env.ledger().sequence(),
-            completed_ledger: None,
-            winner: Winner::None,
-            vested_at: None,
-            player1_claimed: false,
-            player2_claimed: false,
-            conversion_rate: None,
-            token_b: None,
-            conversion_rate_ledger: None,
-            paused_ledger: None,
-            total_pause_duration: 0,
-            referrer: Some(referrer.clone()),
-            last_heartbeat: env.ledger().timestamp(),
-            bracket_id: None,
-            activated_at: None,
-            rollback_vote_player1: false,
-            rollback_vote_player2: false,
-        };
-
-        env.storage().persistent().set(&DataKey::Match(id), &m);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Match(id),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-        let next_id = id.checked_add(1).ok_or(Error::Overflow)?;
-        env.storage().instance().set(&DataKey::MatchCount, &next_id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::GameId(m.game_id.clone()), &true);
-        env.storage().persistent().extend_ttl(
-            &DataKey::GameId(m.game_id.clone()),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        let mut player1_matches: soroban_sdk::Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::PlayerMatches(player1.clone()))
-            .unwrap_or_else(|| soroban_sdk::vec![&env]);
-        player1_matches.push_back(id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::PlayerMatches(player1.clone()), &player1_matches);
-        env.storage().persistent().extend_ttl(
-            &DataKey::PlayerMatches(player1),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        let mut player2_matches: soroban_sdk::Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::PlayerMatches(player2.clone()))
-            .unwrap_or_else(|| soroban_sdk::vec![&env]);
-        player2_matches.push_back(id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::PlayerMatches(player2.clone()), &player2_matches);
-        env.storage().persistent().extend_ttl(
-            &DataKey::PlayerMatches(player2),
-            MATCH_TTL_LEDGERS,
-            MATCH_TTL_LEDGERS,
-        );
-
-        Self::record_snapshot(&env, &m, SnapshotReason::Created);
-        Self::record_platform_match_created(&env, stake_amount);
-
-        env.events().publish(
-            (Symbol::new(&env, "match"), symbol_short!("created")),
-            (id, m.player1, m.player2, stake_amount, referrer),
-        );
-
-        Ok(id)
+        Self::create_match_internal(
+            env,
+            MatchParams {
+                player1,
+                player2,
+                stake_amount,
+                token,
+                token_b: None,
+                conversion_rate: None,
+                game_id,
+                platform,
+                referrer: Some(referrer),
+                bracket_id: None,
+                round: None,
+            },
+        )
     }
 
     /// Player deposits their stake into escrow.
